@@ -26,6 +26,8 @@ import org.apache.flink.runtime.io.network.NettyShuffleEnvironment;
 import org.apache.flink.runtime.io.network.buffer.BufferCompressor;
 import org.apache.flink.runtime.io.network.buffer.BufferPool;
 import org.apache.flink.runtime.io.network.buffer.BufferPoolFactory;
+import org.apache.flink.runtime.io.network.partition.hybrid.HsResultPartition;
+import org.apache.flink.runtime.io.network.partition.hybrid.HybridShuffleConfiguration;
 import org.apache.flink.runtime.shuffle.NettyShuffleUtils;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkRuntimeException;
@@ -38,7 +40,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledExecutorService;
 
 /** Factory for {@link ResultPartition} to use in {@link NettyShuffleEnvironment}. */
 public class ResultPartitionFactory {
@@ -53,7 +55,7 @@ public class ResultPartitionFactory {
 
     private final BatchShuffleReadBufferPool batchShuffleReadBufferPool;
 
-    private final ExecutorService batchShuffleReadIOExecutor;
+    private final ScheduledExecutorService batchShuffleReadIOExecutor;
 
     private final BoundedBlockingSubpartitionType blockingSubpartitionType;
 
@@ -63,7 +65,7 @@ public class ResultPartitionFactory {
 
     private final int networkBufferSize;
 
-    private final boolean blockingShuffleCompressionEnabled;
+    private final boolean batchShuffleCompressionEnabled;
 
     private final String compressionCodec;
 
@@ -72,6 +74,10 @@ public class ResultPartitionFactory {
     private final int sortShuffleMinBuffers;
 
     private final int sortShuffleMinParallelism;
+
+    private final int hybridShuffleSpilledIndexSegmentSize;
+
+    private final long hybridShuffleNumRetainedInMemoryRegionsMax;
 
     private final boolean sslEnabled;
 
@@ -82,18 +88,20 @@ public class ResultPartitionFactory {
             FileChannelManager channelManager,
             BufferPoolFactory bufferPoolFactory,
             BatchShuffleReadBufferPool batchShuffleReadBufferPool,
-            ExecutorService batchShuffleReadIOExecutor,
+            ScheduledExecutorService batchShuffleReadIOExecutor,
             BoundedBlockingSubpartitionType blockingSubpartitionType,
             int configuredNetworkBuffersPerChannel,
             int floatingNetworkBuffersPerGate,
             int networkBufferSize,
-            boolean blockingShuffleCompressionEnabled,
+            boolean batchShuffleCompressionEnabled,
             String compressionCodec,
             int maxBuffersPerChannel,
             int sortShuffleMinBuffers,
             int sortShuffleMinParallelism,
             boolean sslEnabled,
-            int maxOverdraftBuffersPerGate) {
+            int maxOverdraftBuffersPerGate,
+            int hybridShuffleSpilledIndexSegmentSize,
+            long hybridShuffleNumRetainedInMemoryRegionsMax) {
 
         this.partitionManager = partitionManager;
         this.channelManager = channelManager;
@@ -104,13 +112,16 @@ public class ResultPartitionFactory {
         this.batchShuffleReadIOExecutor = batchShuffleReadIOExecutor;
         this.blockingSubpartitionType = blockingSubpartitionType;
         this.networkBufferSize = networkBufferSize;
-        this.blockingShuffleCompressionEnabled = blockingShuffleCompressionEnabled;
+        this.batchShuffleCompressionEnabled = batchShuffleCompressionEnabled;
         this.compressionCodec = compressionCodec;
         this.maxBuffersPerChannel = maxBuffersPerChannel;
         this.sortShuffleMinBuffers = sortShuffleMinBuffers;
         this.sortShuffleMinParallelism = sortShuffleMinParallelism;
         this.sslEnabled = sslEnabled;
         this.maxOverdraftBuffersPerGate = maxOverdraftBuffersPerGate;
+        this.hybridShuffleSpilledIndexSegmentSize = hybridShuffleSpilledIndexSegmentSize;
+        this.hybridShuffleNumRetainedInMemoryRegionsMax =
+                hybridShuffleNumRetainedInMemoryRegionsMax;
     }
 
     public ResultPartition create(
@@ -124,6 +135,7 @@ public class ResultPartitionFactory {
                 desc.getPartitionType(),
                 desc.getNumberOfSubpartitions(),
                 desc.getMaxParallelism(),
+                desc.isBroadcast(),
                 createBufferPoolFactory(desc.getNumberOfSubpartitions(), desc.getPartitionType()));
     }
 
@@ -135,10 +147,10 @@ public class ResultPartitionFactory {
             ResultPartitionType type,
             int numberOfSubpartitions,
             int maxParallelism,
+            boolean isBroadcast,
             SupplierWithException<BufferPool, IOException> bufferPoolFactory) {
         BufferCompressor bufferCompressor = null;
-        if (type.isBlockingOrBlockingPersistentResultPartition()
-                && blockingShuffleCompressionEnabled) {
+        if (type.supportCompression() && batchShuffleCompressionEnabled) {
             bufferCompressor = new BufferCompressor(networkBufferSize, compressionCodec);
         }
 
@@ -213,6 +225,25 @@ public class ResultPartitionFactory {
 
                 partition = blockingPartition;
             }
+        } else if (type == ResultPartitionType.HYBRID_FULL
+                || type == ResultPartitionType.HYBRID_SELECTIVE) {
+            partition =
+                    new HsResultPartition(
+                            taskNameWithSubtaskAndId,
+                            partitionIndex,
+                            id,
+                            type,
+                            subpartitions.length,
+                            maxParallelism,
+                            batchShuffleReadBufferPool,
+                            batchShuffleReadIOExecutor,
+                            partitionManager,
+                            channelManager.createChannel().getPath(),
+                            networkBufferSize,
+                            getHybridShuffleConfiguration(numberOfSubpartitions, type),
+                            bufferCompressor,
+                            isBroadcast,
+                            bufferPoolFactory);
         } else {
             throw new IllegalArgumentException("Unrecognized ResultPartitionType: " + type);
         }
@@ -220,6 +251,19 @@ public class ResultPartitionFactory {
         LOG.debug("{}: Initialized {}", taskNameWithSubtaskAndId, this);
 
         return partition;
+    }
+
+    private HybridShuffleConfiguration getHybridShuffleConfiguration(
+            int numberOfSubpartitions, ResultPartitionType resultPartitionType) {
+        return HybridShuffleConfiguration.builder(
+                        numberOfSubpartitions, batchShuffleReadBufferPool.getNumBuffersPerRequest())
+                .setSpillingStrategyType(
+                        resultPartitionType == ResultPartitionType.HYBRID_FULL
+                                ? HybridShuffleConfiguration.SpillingStrategyType.FULL
+                                : HybridShuffleConfiguration.SpillingStrategyType.SELECTIVE)
+                .setSpilledIndexSegmentSize(hybridShuffleSpilledIndexSegmentSize)
+                .setNumRetainedInMemoryRegionsMax(hybridShuffleNumRetainedInMemoryRegionsMax)
+                .build();
     }
 
     private static void initializeBoundedBlockingPartitions(
@@ -257,6 +301,19 @@ public class ResultPartitionFactory {
         }
     }
 
+    /** Return whether this result partition need overdraft buffer. */
+    private static boolean isOverdraftBufferNeeded(ResultPartitionType resultPartitionType) {
+        // Only pipelined / pipelined-bounded partition needs overdraft buffer. More
+        // specifically, there is no reason to request more buffers for non-pipelined (i.e.
+        // batch) shuffle. The reasons are as follows:
+        // 1. For BoundedBlockingShuffle, each full buffer will be directly released.
+        // 2. For SortMergeShuffle, the maximum capacity of buffer pool is 4 * numSubpartitions. It
+        // is efficient enough to spill this part of memory to disk.
+        // 3. For Hybrid Shuffle, the buffer pool is unbounded. If it can't get a normal buffer, it
+        // also can't get an overdraft buffer.
+        return resultPartitionType.isPipelinedOrPipelinedBoundedResultPartition();
+    }
+
     /**
      * The minimum pool size should be <code>numberOfSubpartitions + 1</code> for two
      * considerations:
@@ -286,7 +343,7 @@ public class ResultPartitionFactory {
                     pair.getRight(),
                     numberOfSubpartitions,
                     maxBuffersPerChannel,
-                    maxOverdraftBuffersPerGate);
+                    isOverdraftBufferNeeded(type) ? maxOverdraftBuffersPerGate : 0);
         };
     }
 

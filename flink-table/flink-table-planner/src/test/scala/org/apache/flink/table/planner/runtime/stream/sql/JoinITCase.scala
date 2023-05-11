@@ -22,7 +22,9 @@ import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.table.api._
 import org.apache.flink.table.api.bridge.scala._
 import org.apache.flink.table.planner.expressions.utils.FuncWithOpen
+import org.apache.flink.table.planner.factories.TestValuesTableFactory
 import org.apache.flink.table.planner.runtime.utils._
+import org.apache.flink.table.planner.runtime.utils.BatchTestBase.row
 import org.apache.flink.table.planner.runtime.utils.StreamingWithStateTestBase.StateBackendMode
 import org.apache.flink.types.Row
 
@@ -64,8 +66,31 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
       .toTable(tEnv, 'a1, 'a2, 'a3)
     val tableB = failingDataSource(TestData.tupleData5)
       .toTable(tEnv, 'b1, 'b2, 'b3, 'b4, 'b5)
-    tEnv.registerTable("A", tableA)
-    tEnv.registerTable("B", tableB)
+    tEnv.createTemporaryView("A", tableA)
+    tEnv.createTemporaryView("B", tableB)
+
+    val dataId1 = TestValuesTableFactory.registerData(TestData.data2_1)
+    tEnv.executeSql(s"""
+                       |create table l (
+                       |  a int,
+                       |  b double
+                       |) with (
+                       |  'connector' = 'values',
+                       |  'data-id' = '$dataId1',
+                       |  'bounded' = 'true'
+                       |)
+                       |""".stripMargin)
+    val dataId2 = TestValuesTableFactory.registerData(TestData.data2_2)
+    tEnv.executeSql(s"""
+                       |create table r (
+                       |  c int,
+                       |  d double
+                       |) with (
+                       |  'connector' = 'values',
+                       |  'data-id' = '$dataId2',
+                       |  'bounded' = 'true'
+                       |)
+                       |""".stripMargin)
   }
 
   // Tests for inner join.
@@ -140,8 +165,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
 
     val table1 = failingDataSource(data1).toTable(tEnv, 'a1, 'a2, 'a3)
     val table2 = failingDataSource(data2).toTable(tEnv, 'b1, 'b2, 'b3)
-    tEnv.registerTable("a", table1)
-    tEnv.registerTable("b", table2)
+    tEnv.createTemporaryView("a", table1)
+    tEnv.createTemporaryView("b", table2)
 
     val sqlQuery = "SELECT * FROM a, b WHERE (a1 = 1 AND b1 = 3) OR (a1 = 2 AND b3 is null) "
 
@@ -175,8 +200,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
     val t1 = failingDataSource(data1).toTable(tEnv, 'a, 'b, 'c)
     val t2 = failingDataSource(data2).toTable(tEnv, 'a, 'b, 'c)
 
-    tEnv.registerTable("T1", t1)
-    tEnv.registerTable("T2", t2)
+    tEnv.createTemporaryView("T1", t1)
+    tEnv.createTemporaryView("T2", t2)
 
     val sqlQuery =
       """
@@ -225,8 +250,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
     val t1 = failingDataSource(data1).toTable(tEnv, 'a, 'b, 'c)
     val t2 = failingDataSource(data2).toTable(tEnv, 'a, 'b, 'c)
 
-    tEnv.registerTable("T1", t1)
-    tEnv.registerTable("T2", t2)
+    tEnv.createTemporaryView("T1", t1)
+    tEnv.createTemporaryView("T2", t2)
 
     val sqlQuery =
       """
@@ -275,8 +300,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
   def testInnerJoin(): Unit = {
     val ds1 = failingDataSource(tuple3Data).toTable(tEnv, 'a, 'b, 'c)
     val ds2 = failingDataSource(smallTuple5Data).toTable(tEnv, 'd, 'e, 'f, 'g, 'h)
-    tEnv.registerTable("ds1", ds1)
-    tEnv.registerTable("ds2", ds2)
+    tEnv.createTemporaryView("ds1", ds1)
+    tEnv.createTemporaryView("ds2", ds2)
     val query = "SELECT b, c, e, g FROM ds1 JOIN ds2 ON b = e"
 
     val sink = new TestingAppendSink
@@ -332,8 +357,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
 
     val t1 = failingDataSource(data1).toTable(tEnv, 'a1, 'b1, 'c1, 'd1)
     val t2 = failingDataSource(data1).toTable(tEnv, 'a2, 'b2, 'c2, 'd2)
-    tEnv.registerTable("Table3", t1)
-    tEnv.registerTable("Table5", t2)
+    tEnv.createTemporaryView("Table3", t1)
+    tEnv.createTemporaryView("Table5", t2)
 
     val sqlQuery = "SELECT a1, a1, c2 FROM Table3 INNER JOIN Table5 ON d1 = d2 where d1 is true"
 
@@ -351,8 +376,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
 
     val ds1 = failingDataSource(TestData.tupleData3).toTable(tEnv, 'a, 'b, 'c)
     val ds2 = failingDataSource(TestData.tupleData5).toTable(tEnv, 'd, 'e, 'f, 'g, 'h)
-    tEnv.registerTable("Table3", ds1)
-    tEnv.registerTable("Table5", ds2)
+    tEnv.createTemporaryView("Table3", ds1)
+    tEnv.createTemporaryView("Table5", ds2)
 
     val sink = new TestingRetractSink
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink).setParallelism(1)
@@ -368,8 +393,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
 
     val ds1 = failingDataSource(TestData.tupleData3).toTable(tEnv, 'a, 'b, 'c)
     val ds2 = failingDataSource(TestData.tupleData5).toTable(tEnv, 'd, 'e, 'f, 'g, 'h)
-    tEnv.registerTable("Table3", ds1)
-    tEnv.registerTable("Table5", ds2)
+    tEnv.createTemporaryView("Table3", ds1)
+    tEnv.createTemporaryView("Table5", ds2)
 
     val sink = new TestingRetractSink
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink).setParallelism(1)
@@ -416,8 +441,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
   def testLeftOuterJoin(): Unit = {
     val ds1 = failingDataSource(tuple3Data).toTable(tEnv, 'a, 'b, 'c)
     val ds2 = failingDataSource(dataCannotBeJoin).toTable(tEnv, 'd, 'e, 'f, 'g, 'h)
-    tEnv.registerTable("ds1", ds1)
-    tEnv.registerTable("ds2", ds2)
+    tEnv.createTemporaryView("ds1", ds1)
+    tEnv.createTemporaryView("ds2", ds2)
     val query = "SELECT b, c, e, g FROM ds1 LEFT OUTER JOIN ds2 ON b = e"
 
     val sink = new TestingRetractSink
@@ -432,8 +457,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
   def testLeftOuterJoinWithRetraction(): Unit = {
     val ds1 = failingDataSource(tuple3Data).toTable(tEnv, 'a, 'b, 'c)
     val ds2 = failingDataSource(smallTuple5Data).toTable(tEnv, 'd, 'e, 'f, 'g, 'h)
-    tEnv.registerTable("ds1", ds1)
-    tEnv.registerTable("ds2", ds2)
+    tEnv.createTemporaryView("ds1", ds1)
+    tEnv.createTemporaryView("ds2", ds2)
     val query = "SELECT b, c, e, g FROM ds1 LEFT OUTER JOIN ds2 ON b = e"
 
     val sink = new TestingRetractSink
@@ -453,8 +478,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
 
     val table1 = failingDataSource(data1).toTable(tEnv, 'pk, 'a)
     val table2 = failingDataSource(data2).toTable(tEnv, 'pk, 'a)
-    tEnv.registerTable("ds1", table1)
-    tEnv.registerTable("ds2", table2)
+    tEnv.createTemporaryView("ds1", table1)
+    tEnv.createTemporaryView("ds2", table2)
 
     val sql =
       """
@@ -519,8 +544,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
 
     val ds1 = failingDataSource(TestData.smallTupleData3).toTable(tEnv, 'a, 'b, 'c)
     val ds2 = failingDataSource(TestData.tupleData5).toTable(tEnv, 'd, 'e, 'f, 'g, 'h)
-    tEnv.registerTable("Table3", ds1)
-    tEnv.registerTable("Table5", ds2)
+    tEnv.createTemporaryView("Table3", ds1)
+    tEnv.createTemporaryView("Table5", ds2)
 
     val sink = new TestingRetractSink
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink).setParallelism(1)
@@ -1096,8 +1121,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
     val t1 = failingDataSource(data1).toTable(tEnv, 'a, 'b)
     val t2 = failingDataSource(data2).toTable(tEnv, 'a, 'b)
 
-    tEnv.registerTable("T1", t1)
-    tEnv.registerTable("T2", t2)
+    tEnv.createTemporaryView("T1", t1)
+    tEnv.createTemporaryView("T2", t2)
 
     val sqlQuery =
       """
@@ -1139,8 +1164,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
     val t1 = failingDataSource(data1).toTable(tEnv, 'a, 'b)
     val t2 = failingDataSource(data2).toTable(tEnv, 'a, 'b)
 
-    tEnv.registerTable("T1", t1)
-    tEnv.registerTable("T2", t2)
+    tEnv.createTemporaryView("T1", t1)
+    tEnv.createTemporaryView("T2", t2)
 
     val sqlQuery =
       """
@@ -1182,8 +1207,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
     val t1 = failingDataSource(data1).toTable(tEnv, 'a, 'b)
     val t2 = failingDataSource(data2).toTable(tEnv, 'a, 'b)
 
-    tEnv.registerTable("T1", t1)
-    tEnv.registerTable("T2", t2)
+    tEnv.createTemporaryView("T1", t1)
+    tEnv.createTemporaryView("T2", t2)
 
     val sqlQuery =
       """
@@ -1224,8 +1249,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
     val t1 = failingDataSource(data1).toTable(tEnv, 'a, 'b)
     val t2 = failingDataSource(data2).toTable(tEnv, 'a, 'b)
 
-    tEnv.registerTable("T1", t1)
-    tEnv.registerTable("T2", t2)
+    tEnv.createTemporaryView("T1", t1)
+    tEnv.createTemporaryView("T2", t2)
 
     val sqlQuery =
       """
@@ -1267,8 +1292,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
     val t1 = failingDataSource(data1).toTable(tEnv, 'a, 'b)
     val t2 = failingDataSource(data2).toTable(tEnv, 'a, 'b)
 
-    tEnv.registerTable("T1", t1)
-    tEnv.registerTable("T2", t2)
+    tEnv.createTemporaryView("T1", t1)
+    tEnv.createTemporaryView("T2", t2)
 
     val sqlQuery =
       """
@@ -1312,8 +1337,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
     val t1 = failingDataSource(data1).toTable(tEnv, 'a, 'b)
     val t2 = failingDataSource(data2).toTable(tEnv, 'a, 'b)
 
-    tEnv.registerTable("T1", t1)
-    tEnv.registerTable("T2", t2)
+    tEnv.createTemporaryView("T1", t1)
+    tEnv.createTemporaryView("T2", t2)
 
     val sqlQuery =
       """
@@ -1358,9 +1383,9 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
     data2.+=((3, -3L))
 
     val t1 = failingDataSource(data1).toTable(tEnv, 'a, 'b)
-    tEnv.registerTable("T1", t1)
+    tEnv.createTemporaryView("T1", t1)
     val t2 = failingDataSource(data2).toTable(tEnv, 'a, 'c)
-    tEnv.registerTable("T2", t2)
+    tEnv.createTemporaryView("T2", t2)
 
     val t3 = tEnv.sqlQuery("select T1.a, b, c from T1, T2 WHERE T1.a = T2.a")
     val sink = new TestingRetractSink
@@ -1381,8 +1406,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
 
     val t1 = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
     val t2 = failingDataSource(data).toTable(tEnv, 'd, 'e, 'f)
-    tEnv.registerTable("T1", t1)
-    tEnv.registerTable("T2", t2)
+    tEnv.createTemporaryView("T1", t1)
+    tEnv.createTemporaryView("T2", t2)
 
     val sql =
       """
@@ -1402,8 +1427,8 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
     val ds1 = failingDataSource(TestData.smallTupleData3).toTable(tEnv, 'a, 'b, 'c)
     val ds2 = failingDataSource(TestData.tupleData5).toTable(tEnv, 'd, 'e, 'f, 'g, 'h)
 
-    tEnv.registerTable("T3", ds1)
-    tEnv.registerTable("T5", ds2)
+    tEnv.createTemporaryView("T3", ds1)
+    tEnv.createTemporaryView("T5", ds2)
     tEnv.registerFunction("funcWithOpen", new FuncWithOpen)
 
     val sql = "SELECT c, g FROM T3 join T5 on funcWithOpen(a + d) where b = e"
@@ -1414,5 +1439,228 @@ class JoinITCase(state: StateBackendMode) extends StreamingWithStateTestBase(sta
 
     val expected = Seq("Hi,Hallo", "Hello,Hallo Welt", "Hello world,Hallo Welt")
     assertEquals(expected.sorted, sink.getRetractResults.sorted)
+  }
+
+  @Test
+  def testJoinWithFilterPushDown(): Unit = {
+    checkResult(
+      """
+        |select * from
+        |  (select a, max(b) b, count(*) c1 from l group by a)
+        |  join
+        |  (select c, max(d) d, count(*) c2 from r group by c)
+        |  on a = c and c1 = c2 where a >= 2
+        |""".stripMargin,
+      Seq(row(2, 1.0, 2, 2, 3.0, 2), row(3, 3.0, 1, 3, 2.0, 1), row(6, null, 1, 6, null, 1))
+    )
+
+    checkResult(
+      """
+        |select * from
+        |  (select a, max(b) b, count(*) c1 from l group by a)
+        |  left join
+        |  (select c, max(d) d, count(*) c2 from r group by c)
+        |  on a = c and c1 = c2 where a >= 2
+        |""".stripMargin,
+      Seq(row(2, 1.0, 2, 2, 3.0, 2), row(3, 3.0, 1, 3, 2.0, 1), row(6, null, 1, 6, null, 1))
+    )
+
+    checkResult(
+      """
+        |select * from
+        |  (select a, max(b) b, count(*) c1 from l group by a)
+        |  left join
+        |  (select c, max(d) d, count(*) c2 from r group by c)
+        |  on a = c and c1 = c2 where c >= 2
+        |""".stripMargin,
+      Seq(row(2, 1.0, 2, 2, 3.0, 2), row(3, 3.0, 1, 3, 2.0, 1), row(6, null, 1, 6, null, 1))
+    )
+
+    checkResult(
+      """
+        |select * from
+        |  (select a, max(b) b, count(*) c1 from l group by a)
+        |  right join
+        |  (select c, max(d) d, count(*) c2 from r group by c)
+        |  on a = c and c1 = c2 where a >= 2
+        |""".stripMargin,
+      Seq(row(2, 1.0, 2, 2, 3.0, 2), row(3, 3.0, 1, 3, 2.0, 1), row(6, null, 1, 6, null, 1))
+    )
+
+    checkResult(
+      """
+        |select * from
+        |  (select a, max(b) b, count(*) c1 from l group by a)
+        |  right join
+        |  (select c, max(d) d, count(*) c2 from r group by c)
+        |  on a = c and c1 = c2 where c >= 2
+        |""".stripMargin,
+      Seq(
+        row(2, 1.0, 2, 2, 3.0, 2),
+        row(3, 3.0, 1, 3, 2.0, 1),
+        row(6, null, 1, 6, null, 1),
+        row(null, null, null, 4, 1.0, 1))
+    )
+
+    // For left join, we will push c = 3 into left side l by
+    // derived from a = c and c = 3.
+    checkResult(
+      """
+        |select * from
+        | l left join r on a = c where c = 3
+        |""".stripMargin,
+      Seq(
+        row(3, 3.0, 3, 2.0)
+      )
+    )
+
+    // For left/right join, we will only push equal filter condition into
+    // other side by derived from join condition and filter condition. So,
+    // c IS NULL cannot be push into left side.
+    checkResult(
+      """
+        |select * from
+        | l left join r on a = c where c IS NULL
+        |""".stripMargin,
+      Seq(
+        row(1, 2.0, null, null),
+        row(1, 2.0, null, null),
+        row(null, 5.0, null, null),
+        row(null, null, null, null)
+      )
+    )
+
+    checkResult(
+      """
+        |select * from
+        | l left join r on a = c where c IS NULL AND a <= 1
+        |""".stripMargin,
+      Seq(
+        row(1, 2.0, null, null),
+        row(1, 2.0, null, null)
+      )
+    )
+
+    // For left/right join, we will only push equal filter condition into
+    // other side by derived from join condition and filter condition. So,
+    // c < 3 cannot be push into left side.
+    checkResult(
+      """
+        |select * from
+        | l left join r on a = c where c < 3 AND a <= 3
+        |""".stripMargin,
+      Seq(
+        row(2, 1.0, 2, 3.0),
+        row(2, 1.0, 2, 3.0),
+        row(2, 1.0, 2, 3.0),
+        row(2, 1.0, 2, 3.0)
+      )
+    )
+
+    // C <> 3 cannot be push into left side.
+    checkResult(
+      """
+        |select * from
+        | l left join r on a = c where c <> 3 AND a <= 3
+        |""".stripMargin,
+      Seq(
+        row(2, 1.0, 2, 3.0),
+        row(2, 1.0, 2, 3.0),
+        row(2, 1.0, 2, 3.0),
+        row(2, 1.0, 2, 3.0)
+      )
+    )
+  }
+
+  @Test
+  def testJoinWithJoinConditionPushDown(): Unit = {
+    checkResult(
+      """
+        |select * from
+        |  (select a, max(b) b, count(*) c1 from l group by a)
+        |  join
+        |  (select c, max(d) d, count(*) c2 from r group by c)
+        |  on a = c and c1 = c2 and a >= 2
+        |""".stripMargin,
+      Seq(row(2, 1.0, 2, 2, 3.0, 2), row(3, 3.0, 1, 3, 2.0, 1), row(6, null, 1, 6, null, 1))
+    )
+
+    checkResult(
+      """
+        |select * from
+        |  (select a, max(b) b, count(*) c1 from l group by a)
+        |  left join
+        |  (select c, max(d) d, count(*) c2 from r group by c)
+        |  on a = c and c1 = c2 and a >= 2
+        |""".stripMargin,
+      Seq(
+        row(1, 2.0, 2, null, null, null),
+        row(2, 1.0, 2, 2, 3.0, 2),
+        row(3, 3.0, 1, 3, 2.0, 1),
+        row(6, null, 1, 6, null, 1),
+        row(null, 5.0, 2, null, null, null))
+    )
+
+    checkResult(
+      """
+        |select * from
+        |  (select a, max(b) b, count(*) c1 from l group by a)
+        |  left join
+        |  (select c, max(d) d, count(*) c2 from r group by c)
+        |  on a = c and c1 = c2 and c >= 2
+        |""".stripMargin,
+      Seq(
+        row(1, 2.0, 2, null, null, null),
+        row(2, 1.0, 2, 2, 3.0, 2),
+        row(3, 3.0, 1, 3, 2.0, 1),
+        row(6, null, 1, 6, null, 1),
+        row(null, 5.0, 2, null, null, null))
+    )
+
+    checkResult(
+      """
+        |select * from
+        |  (select a, max(b) b, count(*) c1 from l group by a)
+        |  right join
+        |  (select c, max(d) d, count(*) c2 from r group by c)
+        |  on a = c and c1 = c2 and a >= 2
+        |""".stripMargin,
+      Seq(
+        row(2, 1.0, 2, 2, 3.0, 2),
+        row(3, 3.0, 1, 3, 2.0, 1),
+        row(6, null, 1, 6, null, 1),
+        row(null, null, null, 4, 1.0, 1),
+        row(null, null, null, null, 5.0, 2))
+    )
+
+    checkResult(
+      """
+        |select * from
+        |  (select a, max(b) b, count(*) c1 from l group by a)
+        |  right join
+        |  (select c, max(d) d, count(*) c2 from r group by c)
+        |  on a = c and c1 = c2 and c >= 2
+        |""".stripMargin,
+      Seq(
+        row(2, 1.0, 2, 2, 3.0, 2),
+        row(3, 3.0, 1, 3, 2.0, 1),
+        row(6, null, 1, 6, null, 1),
+        row(null, null, null, 4, 1.0, 1),
+        row(null, null, null, null, 5.0, 2))
+    )
+  }
+
+  private def checkResult(sql: String, expected: Seq[Row]): Unit = {
+    val sink = new TestingRetractSink
+    tEnv.sqlQuery(sql).toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+
+    val expectedResult = expected
+      .map(
+        r => {
+          (0 until r.getArity).map(i => r.getField(i)).mkString(",")
+        })
+      .sorted
+    assertEquals(expectedResult, sink.getRetractResults.sorted)
   }
 }

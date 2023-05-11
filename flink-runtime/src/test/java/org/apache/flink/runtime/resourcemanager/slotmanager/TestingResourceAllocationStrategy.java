@@ -18,12 +18,14 @@
 package org.apache.flink.runtime.resourcemanager.slotmanager;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.runtime.blocklist.BlockedTaskManagerChecker;
 import org.apache.flink.runtime.slots.ResourceRequirement;
 import org.apache.flink.util.Preconditions;
 
 import java.util.Collection;
 import java.util.Map;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 
 /** Implementation of {@link ResourceAllocationStrategy} for testing purpose. */
 public class TestingResourceAllocationStrategy implements ResourceAllocationStrategy {
@@ -33,22 +35,36 @@ public class TestingResourceAllocationStrategy implements ResourceAllocationStra
                     ResourceAllocationResult>
             tryFulfillRequirementsFunction;
 
+    private final Function<TaskManagerResourceInfoProvider, ResourceReleaseResult>
+            tryReleaseUnusedResourcesFunction;
+
     private TestingResourceAllocationStrategy(
             BiFunction<
                             Map<JobID, Collection<ResourceRequirement>>,
                             TaskManagerResourceInfoProvider,
                             ResourceAllocationResult>
-                    tryFulfillRequirementsFunction) {
+                    tryFulfillRequirementsFunction,
+            Function<TaskManagerResourceInfoProvider, ResourceReleaseResult>
+                    tryReleaseUnusedResourcesFunction) {
         this.tryFulfillRequirementsFunction =
                 Preconditions.checkNotNull(tryFulfillRequirementsFunction);
+        this.tryReleaseUnusedResourcesFunction =
+                Preconditions.checkNotNull(tryReleaseUnusedResourcesFunction);
     }
 
     @Override
     public ResourceAllocationResult tryFulfillRequirements(
             Map<JobID, Collection<ResourceRequirement>> missingResources,
-            TaskManagerResourceInfoProvider taskManagerResourceInfoProvider) {
+            TaskManagerResourceInfoProvider taskManagerResourceInfoProvider,
+            BlockedTaskManagerChecker blockedTaskManagerChecker) {
         return tryFulfillRequirementsFunction.apply(
                 missingResources, taskManagerResourceInfoProvider);
+    }
+
+    @Override
+    public ResourceReleaseResult tryReleaseUnusedResources(
+            TaskManagerResourceInfoProvider taskManagerResourceInfoProvider) {
+        return tryReleaseUnusedResourcesFunction.apply(taskManagerResourceInfoProvider);
     }
 
     public static Builder newBuilder() {
@@ -63,6 +79,10 @@ public class TestingResourceAllocationStrategy implements ResourceAllocationStra
                 tryFulfillRequirementsFunction =
                         (ignored0, ignored1) -> ResourceAllocationResult.builder().build();
 
+        private Function<TaskManagerResourceInfoProvider, ResourceReleaseResult>
+                tryReleaseUnusedResourcesFunction =
+                        ignored -> ResourceReleaseResult.builder().build();
+
         public Builder setTryFulfillRequirementsFunction(
                 BiFunction<
                                 Map<JobID, Collection<ResourceRequirement>>,
@@ -73,8 +93,16 @@ public class TestingResourceAllocationStrategy implements ResourceAllocationStra
             return this;
         }
 
+        public Builder setTryReleaseUnusedResourcesFunction(
+                Function<TaskManagerResourceInfoProvider, ResourceReleaseResult>
+                        tryReleaseUnusedResourcesFunction) {
+            this.tryReleaseUnusedResourcesFunction = tryReleaseUnusedResourcesFunction;
+            return this;
+        }
+
         public TestingResourceAllocationStrategy build() {
-            return new TestingResourceAllocationStrategy(tryFulfillRequirementsFunction);
+            return new TestingResourceAllocationStrategy(
+                    tryFulfillRequirementsFunction, tryReleaseUnusedResourcesFunction);
         }
     }
 }

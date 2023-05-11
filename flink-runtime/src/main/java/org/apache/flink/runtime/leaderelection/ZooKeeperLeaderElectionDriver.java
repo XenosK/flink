@@ -22,6 +22,7 @@ import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.runtime.rpc.FatalErrorHandler;
 import org.apache.flink.runtime.util.ZooKeeperUtils;
 import org.apache.flink.util.ExceptionUtils;
+import org.apache.flink.util.Preconditions;
 
 import org.apache.flink.shaded.curator5.org.apache.curator.framework.CuratorFramework;
 import org.apache.flink.shaded.curator5.org.apache.curator.framework.recipes.cache.ChildData;
@@ -71,8 +72,6 @@ public class ZooKeeperLeaderElectionDriver implements LeaderElectionDriver, Lead
 
     private final FatalErrorHandler fatalErrorHandler;
 
-    private final String leaderContenderDescription;
-
     private volatile boolean running;
 
     /**
@@ -82,21 +81,18 @@ public class ZooKeeperLeaderElectionDriver implements LeaderElectionDriver, Lead
      * @param path ZooKeeper node path for the leader election
      * @param leaderElectionEventHandler Event handler for processing leader change events
      * @param fatalErrorHandler Fatal error handler
-     * @param leaderContenderDescription Leader contender description
      */
     public ZooKeeperLeaderElectionDriver(
             CuratorFramework client,
             String path,
             LeaderElectionEventHandler leaderElectionEventHandler,
-            FatalErrorHandler fatalErrorHandler,
-            String leaderContenderDescription)
+            FatalErrorHandler fatalErrorHandler)
             throws Exception {
         checkNotNull(path);
         this.client = checkNotNull(client);
         this.connectionInformationPath = ZooKeeperUtils.generateConnectionInformationPath(path);
         this.leaderElectionEventHandler = checkNotNull(leaderElectionEventHandler);
         this.fatalErrorHandler = checkNotNull(fatalErrorHandler);
-        this.leaderContenderDescription = checkNotNull(leaderContenderDescription);
 
         leaderLatchPath = ZooKeeperUtils.generateLeaderLatchPath(path);
         leaderLatch = new LeaderLatch(client, leaderLatchPath);
@@ -149,8 +145,7 @@ public class ZooKeeperLeaderElectionDriver implements LeaderElectionDriver, Lead
 
     @Override
     public boolean hasLeadership() {
-        assert (running);
-        return leaderLatch.hasLeadership();
+        return running && leaderLatch.hasLeadership();
     }
 
     @Override
@@ -166,18 +161,20 @@ public class ZooKeeperLeaderElectionDriver implements LeaderElectionDriver, Lead
     private void retrieveLeaderInformationFromZooKeeper() throws Exception {
         if (leaderLatch.hasLeadership()) {
             ChildData childData = cache.getCurrentData(connectionInformationPath);
-            if (childData != null) {
-                leaderElectionEventHandler.onLeaderInformationChange(
-                        ZooKeeperUtils.readLeaderInformation(childData.getData()));
-            }
-            leaderElectionEventHandler.onLeaderInformationChange(LeaderInformation.empty());
+            leaderElectionEventHandler.onLeaderInformationChange(
+                    childData == null
+                            ? LeaderInformation.empty()
+                            : ZooKeeperUtils.readLeaderInformation(childData.getData()));
         }
     }
 
     /** Writes the current leader's address as well the given leader session ID to ZooKeeper. */
     @Override
     public void writeLeaderInformation(LeaderInformation leaderInformation) {
-        assert (running);
+        Preconditions.checkState(
+                running,
+                "Leader information can only be written if the driver hasn't been closed, yet.");
+
         // this method does not have to be synchronized because the curator framework client
         // is thread-safe. We do not write the empty data to ZooKeeper here. Because
         // check-leadership-and-update
@@ -223,9 +220,7 @@ public class ZooKeeperLeaderElectionDriver implements LeaderElectionDriver, Lead
             case LOST:
                 // Maybe we have to throw an exception here to terminate the JobManager
                 LOG.warn(
-                        "Connection to ZooKeeper lost. The contender "
-                                + leaderContenderDescription
-                                + " no longer participates in the leader election.");
+                        "Connection to ZooKeeper lost. The contender no longer participates in the leader election.");
                 break;
         }
     }

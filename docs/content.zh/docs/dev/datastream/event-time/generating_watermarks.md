@@ -415,6 +415,11 @@ class TimeLagWatermarkGenerator extends AssignerWithPeriodicWatermarks[MyEvent] 
 }
 ```
 {{< /tab >}}
+{{< tab "Python" >}}
+```python
+目前在python中不支持该api
+```
+{{< /tab >}}
 {{< /tabs >}}
 
 <a name="writing-a-punctuated-watermarkgenerator"></a>
@@ -460,6 +465,11 @@ class PunctuatedAssigner extends AssignerWithPunctuatedWatermarks[MyEvent] {
 }
 ```
 {{< /tab >}}
+{{< tab "Python" >}}
+```python
+Python API 中尚不支持该特性。
+```
+{{< /tab >}}
 {{< /tabs >}}
 
 {{< hint warning >}}
@@ -481,22 +491,46 @@ class PunctuatedAssigner extends AssignerWithPunctuatedWatermarks[MyEvent] {
 {{< tabs "bd763159-5532-4f69-ae15-a4836886e4fe" >}}
 {{< tab "Java" >}}
 ```java
-FlinkKafkaConsumer<MyType> kafkaSource = new FlinkKafkaConsumer<>("myTopic", schema, props);
-kafkaSource.assignTimestampsAndWatermarks(
-        WatermarkStrategy
-                .forBoundedOutOfOrderness(Duration.ofSeconds(20)));
+KafkaSource<String> kafkaSource = KafkaSource.<String>builder()
+    .setBootstrapServers(brokers)
+    .setTopics("my-topic")
+    .setGroupId("my-group")
+    .setStartingOffsets(OffsetsInitializer.earliest())
+    .setValueOnlyDeserializer(new SimpleStringSchema())
+    .build();
 
-DataStream<MyType> stream = env.addSource(kafkaSource);
+DataStream<String> stream = env.fromSource(
+    kafkaSource, WatermarkStrategy.forBoundedOutOfOrderness(Duration.ofSeconds(20)), "mySource");
 ```
 {{< /tab >}}
 {{< tab "Scala" >}}
 ```scala
-val kafkaSource = new FlinkKafkaConsumer[MyType]("myTopic", schema, props)
-kafkaSource.assignTimestampsAndWatermarks(
-  WatermarkStrategy
-    .forBoundedOutOfOrderness(Duration.ofSeconds(20)))
+val kafkaSource: KafkaSource[String] = KafkaSource.builder[String]()
+    .setBootstrapServers("brokers")
+    .setTopics("my-topic")
+    .setGroupId("my-group")
+    .setStartingOffsets(OffsetsInitializer.earliest())
+    .setValueOnlyDeserializer(new SimpleStringSchema)
+    .build()
 
-val stream: DataStream[MyType] = env.addSource(kafkaSource)
+val stream = env.fromSource(
+    kafkaSource, WatermarkStrategy.forBoundedOutOfOrderness(Duration.ofSeconds(20)), "mySource")
+```
+{{< /tab >}}
+{{< tab "Python" >}}
+```python
+kafka_source = KafkaSource.builder()
+    .set_bootstrap_servers(brokers)
+    .set_topics("my-topic")
+    .set_group_id("my-group")
+    .set_starting_offsets(KafkaOffsetsInitializer.earliest())
+    .set_value_only_deserializer(SimpleStringSchema())
+    .build()
+
+stream = env.from_source(
+    source=kafka_source,
+    watermark_strategy=WatermarkStrategy.for_bounded_out_of_orderness(Duration.of_seconds(20)),
+    source_name="kafka_source")
 ```
 {{< /tab >}}
 {{< /tabs >}}

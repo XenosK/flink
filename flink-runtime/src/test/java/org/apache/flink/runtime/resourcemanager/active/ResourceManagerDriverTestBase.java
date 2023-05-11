@@ -19,6 +19,7 @@
 package org.apache.flink.runtime.resourcemanager.active;
 
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.runtime.blocklist.BlockedNodeRetriever;
 import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.clusterframework.TaskExecutorProcessSpec;
 import org.apache.flink.runtime.clusterframework.TaskExecutorProcessUtils;
@@ -47,6 +48,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 public abstract class ResourceManagerDriverTestBase<WorkerType extends ResourceIDRetrievable> {
 
     protected static final long TIMEOUT_SEC = 5L;
+    protected static final long TIMEOUT_SHOULD_NOT_HAPPEN_MS = 10;
 
     protected static final TaskExecutorProcessSpec TASK_EXECUTOR_PROCESS_SPEC =
             TaskExecutorProcessUtils.processSpecFromWorkerResourceSpec(
@@ -59,13 +61,13 @@ public abstract class ResourceManagerDriverTestBase<WorkerType extends ResourceI
                             runnable -> new Thread(runnable, MAIN_THREAD_NAME)));
 
     @Test
-    public void testInitialize() throws Exception {
+    void testInitialize() throws Exception {
         final Context context = createContext();
         context.runTest(context::validateInitialization);
     }
 
     @Test
-    public void testRecoverPreviousAttemptWorkers() throws Exception {
+    void testRecoverPreviousAttemptWorkers() throws Exception {
         final CompletableFuture<Collection<WorkerType>> recoveredWorkersFuture =
                 new CompletableFuture<>();
         final Context context = createContext();
@@ -79,7 +81,7 @@ public abstract class ResourceManagerDriverTestBase<WorkerType extends ResourceI
     }
 
     @Test
-    public void testTerminate() throws Exception {
+    void testTerminate() throws Exception {
         final Context context = createContext();
         context.runTest(
                 () -> {
@@ -89,22 +91,22 @@ public abstract class ResourceManagerDriverTestBase<WorkerType extends ResourceI
     }
 
     @Test
-    public void testDeregisterApplicationSucceeded() throws Exception {
+    void testDeregisterApplicationSucceeded() throws Exception {
         testDeregisterApplication(ApplicationStatus.SUCCEEDED);
     }
 
     @Test
-    public void testDeregisterApplicationFailed() throws Exception {
+    void testDeregisterApplicationFailed() throws Exception {
         testDeregisterApplication(ApplicationStatus.FAILED);
     }
 
     @Test
-    public void testDeregisterApplicationCanceled() throws Exception {
+    void testDeregisterApplicationCanceled() throws Exception {
         testDeregisterApplication(ApplicationStatus.CANCELED);
     }
 
     @Test
-    public void testDeregisterApplicationUnknown() throws Exception {
+    void testDeregisterApplicationUnknown() throws Exception {
         testDeregisterApplication(ApplicationStatus.UNKNOWN);
     }
 
@@ -118,7 +120,7 @@ public abstract class ResourceManagerDriverTestBase<WorkerType extends ResourceI
     }
 
     @Test
-    public void testRequestResource() throws Exception {
+    void testRequestResource() throws Exception {
         final Context context = createContext();
         context.runTest(
                 () -> {
@@ -130,7 +132,7 @@ public abstract class ResourceManagerDriverTestBase<WorkerType extends ResourceI
     }
 
     @Test
-    public void testReleaseResource() throws Exception {
+    void testReleaseResource() throws Exception {
         final CompletableFuture<WorkerType> requestResourceFuture = new CompletableFuture<>();
         final CompletableFuture<WorkerType> releaseResourceFuture = new CompletableFuture<>();
         final Context context = createContext();
@@ -164,9 +166,14 @@ public abstract class ResourceManagerDriverTestBase<WorkerType extends ResourceI
 
         private ResourceManagerDriver<WorkerType> driver;
         private ScheduledExecutor mainThreadExecutor;
+        private BlockedNodeRetriever blockedNodeRetriever = () -> Collections.emptySet();
 
         protected ResourceManagerDriver<WorkerType> getDriver() {
             return driver;
+        }
+
+        public void setBlockedNodeRetriever(BlockedNodeRetriever blockedNodeRetriever) {
+            this.blockedNodeRetriever = blockedNodeRetriever;
         }
 
         protected final void runTest(RunnableWithException testMethod) throws Exception {
@@ -178,7 +185,8 @@ public abstract class ResourceManagerDriverTestBase<WorkerType extends ResourceI
             driver.initialize(
                     resourceEventHandlerBuilder.build(),
                     mainThreadExecutor,
-                    ForkJoinPool.commonPool());
+                    ForkJoinPool.commonPool(),
+                    blockedNodeRetriever);
 
             testMethod.run();
         }

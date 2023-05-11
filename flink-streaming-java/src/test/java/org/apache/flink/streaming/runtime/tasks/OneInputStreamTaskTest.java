@@ -37,8 +37,12 @@ import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
+import org.apache.flink.runtime.io.AvailabilityProvider;
 import org.apache.flink.runtime.io.network.api.CancelCheckpointMarker;
 import org.apache.flink.runtime.io.network.api.CheckpointBarrier;
+import org.apache.flink.runtime.io.network.api.writer.RecordOrEventCollectingResultPartitionWriter;
+import org.apache.flink.runtime.io.network.api.writer.ResultPartitionWriter;
+import org.apache.flink.runtime.io.network.api.writer.ResultPartitionWriterWithAvailabilityHelper;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.metrics.MetricNames;
 import org.apache.flink.runtime.metrics.NoOpMetricRegistry;
@@ -46,6 +50,7 @@ import org.apache.flink.runtime.metrics.groups.InternalOperatorMetricGroup;
 import org.apache.flink.runtime.metrics.groups.TaskIOMetricGroup;
 import org.apache.flink.runtime.metrics.groups.TaskManagerMetricGroup;
 import org.apache.flink.runtime.metrics.groups.TaskMetricGroup;
+import org.apache.flink.runtime.metrics.groups.UnregisteredMetricGroups;
 import org.apache.flink.runtime.metrics.util.InterceptingOperatorMetricGroup;
 import org.apache.flink.runtime.metrics.util.InterceptingTaskMetricGroup;
 import org.apache.flink.runtime.operators.testutils.MockInputSplitProvider;
@@ -57,12 +62,16 @@ import org.apache.flink.streaming.api.graph.StreamEdge;
 import org.apache.flink.streaming.api.graph.StreamNode;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
+import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamMap;
 import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
+import org.apache.flink.streaming.runtime.streamrecord.StreamElementSerializer;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import org.apache.flink.streaming.runtime.tasks.StreamTask.CanEmitBatchOfRecordsChecker;
 import org.apache.flink.streaming.runtime.watermarkstatus.WatermarkStatus;
 import org.apache.flink.streaming.util.TestHarnessUtil;
+import org.apache.flink.util.OutputTag;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.TestLogger;
 
@@ -87,6 +96,7 @@ import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.cr
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -954,6 +964,139 @@ public class OneInputStreamTaskTest extends TestLogger {
         testHarness.waitForTaskCompletion();
     }
 
+    @Test
+    public void testCanEmitBatchOfRecords() throws Exception {
+        AvailabilityProvider.AvailabilityHelper availabilityHelper =
+                new AvailabilityProvider.AvailabilityHelper();
+        try (StreamTaskMailboxTestHarness<Integer> testHarness =
+                new StreamTaskMailboxTestHarnessBuilder<>(
+                                OneInputStreamTask::new, BasicTypeInfo.INT_TYPE_INFO)
+                        .addInput(BasicTypeInfo.INT_TYPE_INFO)
+                        .addAdditionalOutput(
+                                new ResultPartitionWriterWithAvailabilityHelper(availabilityHelper))
+                        .setupOperatorChain(new TestOperator())
+                        .finishForSingletonOperatorChain(IntSerializer.INSTANCE)
+                        .build()) {
+            CanEmitBatchOfRecordsChecker canEmitBatchOfRecordsChecker =
+                    testHarness.streamTask.getCanEmitBatchOfRecords();
+            testHarness.processAll();
+
+            availabilityHelper.resetAvailable();
+            assertTrue(canEmitBatchOfRecordsChecker.check());
+
+            // The canEmitBatchOfRecordsChecker should be the false after the record writer is
+            // unavailable.
+            availabilityHelper.resetUnavailable();
+            assertFalse(canEmitBatchOfRecordsChecker.check());
+
+            // Restore record writer to available
+            availabilityHelper.resetAvailable();
+            assertTrue(canEmitBatchOfRecordsChecker.check());
+
+            // The canEmitBatchOfRecordsChecker should be the false after add the mail to mail box.
+            testHarness.streamTask.mainMailboxExecutor.execute(() -> {}, "mail");
+            assertFalse(canEmitBatchOfRecordsChecker.check());
+
+            testHarness.processAll();
+            assertTrue(canEmitBatchOfRecordsChecker.check());
+        }
+    }
+
+    @Test
+    public void testTaskSideOutputStatistics() throws Exception {
+        TaskMetricGroup taskMetricGroup =
+                UnregisteredMetricGroups.createUnregisteredTaskMetricGroup();
+
+        ResultPartitionWriter[] partitionWriters = new ResultPartitionWriter[3];
+        for (int i = 0; i < partitionWriters.length; ++i) {
+            partitionWriters[i] =
+                    new RecordOrEventCollectingResultPartitionWriter<>(
+                            new ArrayDeque<>(),
+                            new StreamElementSerializer<>(
+                                    BasicTypeInfo.INT_TYPE_INFO.createSerializer(
+                                            new ExecutionConfig())));
+            partitionWriters[i].setup();
+        }
+
+        try (StreamTaskMailboxTestHarness<Integer> testHarness =
+                new StreamTaskMailboxTestHarnessBuilder<>(
+                                OneInputStreamTask::new, BasicTypeInfo.INT_TYPE_INFO)
+                        .addInput(BasicTypeInfo.INT_TYPE_INFO)
+                        .addAdditionalOutput(partitionWriters)
+                        .setupOperatorChain(new OperatorID(), new PassThroughOperator<>())
+                        .chain(BasicTypeInfo.INT_TYPE_INFO.createSerializer(new ExecutionConfig()))
+                        .setOperatorFactory(SimpleOperatorFactory.of(new OddEvenOperator()))
+                        .addNonChainedOutputsCount(
+                                new OutputTag<>("odd", BasicTypeInfo.INT_TYPE_INFO), 2)
+                        .addNonChainedOutputsCount(1)
+                        .build()
+                        .chain(BasicTypeInfo.INT_TYPE_INFO.createSerializer(new ExecutionConfig()))
+                        .setOperatorFactory(SimpleOperatorFactory.of(new DuplicatingOperator()))
+                        .addNonChainedOutputsCount(1)
+                        .build()
+                        .finish()
+                        .setTaskMetricGroup(taskMetricGroup)
+                        .build()) {
+            Counter numRecordsInCounter =
+                    taskMetricGroup.getIOMetricGroup().getNumRecordsInCounter();
+            Counter numRecordsOutCounter =
+                    taskMetricGroup.getIOMetricGroup().getNumRecordsOutCounter();
+
+            final int numEvenRecords = 5;
+            final int numOddRecords = 3;
+
+            for (int x = 0; x < numEvenRecords; x++) {
+                testHarness.processElement(new StreamRecord<>(2 * x));
+            }
+
+            for (int x = 0; x < numOddRecords; x++) {
+                testHarness.processElement(new StreamRecord<>(2 * x + 1));
+            }
+
+            final int oddEvenOperatorOutputsWithOddTag = numOddRecords;
+            final int oddEvenOperatorOutputsWithoutTag = numOddRecords + numEvenRecords;
+            final int duplicatingOperatorOutput = (numOddRecords + numEvenRecords) * 2;
+            assertEquals(numOddRecords + numEvenRecords, numRecordsInCounter.getCount());
+            assertEquals(
+                    oddEvenOperatorOutputsWithOddTag
+                            + oddEvenOperatorOutputsWithoutTag
+                            + duplicatingOperatorOutput,
+                    numRecordsOutCounter.getCount());
+            testHarness.waitForTaskCompletion();
+        } finally {
+            for (ResultPartitionWriter partitionWriter : partitionWriters) {
+                partitionWriter.close();
+            }
+        }
+    }
+
+    static class PassThroughOperator<T> extends AbstractStreamOperator<T>
+            implements OneInputStreamOperator<T, T> {
+
+        @Override
+        public void processElement(StreamRecord<T> element) throws Exception {
+            output.collect(element);
+        }
+    }
+
+    static class OddEvenOperator extends AbstractStreamOperator<Integer>
+            implements OneInputStreamOperator<Integer, Integer> {
+        private final OutputTag<Integer> oddOutputTag =
+                new OutputTag<>("odd", BasicTypeInfo.INT_TYPE_INFO);
+        private final OutputTag<Integer> evenOutputTag =
+                new OutputTag<>("even", BasicTypeInfo.INT_TYPE_INFO);
+
+        @Override
+        public void processElement(StreamRecord<Integer> element) {
+            if (element.getValue() % 2 == 0) {
+                output.collect(evenOutputTag, element);
+            } else {
+                output.collect(oddOutputTag, element);
+            }
+            output.collect(element);
+        }
+    }
+
     static class WatermarkMetricOperator extends AbstractStreamOperator<String>
             implements OneInputStreamOperator<String, String> {
 
@@ -1014,7 +1157,8 @@ public class OneInputStreamTaskTest extends TestLogger {
         }
 
         streamConfig.setChainedOutputs(outputEdges);
-        streamConfig.setTransitiveChainedTaskConfigs(chainedTaskConfigs);
+        chainedTaskConfigs.values().forEach(StreamConfig::serializeAllConfigs);
+        streamConfig.setAndSerializeTransitiveChainedTaskConfigs(chainedTaskConfigs);
     }
 
     private static class IdentityKeySelector<IN> implements KeySelector<IN, IN> {

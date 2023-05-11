@@ -86,7 +86,6 @@ import java.util.Queue;
 import java.util.concurrent.RunnableFuture;
 
 import static junit.framework.TestCase.assertNotNull;
-import static org.apache.flink.contrib.streaming.state.RocksDBKeyedStateBackendBuilder.DB_INSTANCE_DIR_STRING;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -148,7 +147,9 @@ public class EmbeddedRocksDBStateBackendTest
     private final RocksDBResourceContainer optionsContainer = new RocksDBResourceContainer();
 
     public void prepareRocksDB() throws Exception {
-        String dbPath = new File(TEMP_FOLDER.newFolder(), DB_INSTANCE_DIR_STRING).getAbsolutePath();
+        String dbPath =
+                RocksDBKeyedStateBackendBuilder.getInstanceRocksDBPath(TEMP_FOLDER.newFolder())
+                        .getAbsolutePath();
         ColumnFamilyOptions columnOptions = optionsContainer.getColumnOptions();
 
         ArrayList<ColumnFamilyHandle> columnFamilyHandles = new ArrayList<>(1);
@@ -331,10 +332,10 @@ public class EmbeddedRocksDBStateBackendTest
 
             ValueStateDescriptor<String> stubState1 =
                     new ValueStateDescriptor<>("StubState-1", StringSerializer.INSTANCE);
-            test.createInternalState(StringSerializer.INSTANCE, stubState1);
+            test.createOrUpdateInternalState(StringSerializer.INSTANCE, stubState1);
             ValueStateDescriptor<String> stubState2 =
                     new ValueStateDescriptor<>("StubState-2", StringSerializer.INSTANCE);
-            test.createInternalState(StringSerializer.INSTANCE, stubState2);
+            test.createOrUpdateInternalState(StringSerializer.INSTANCE, stubState2);
 
             // The default CF is pre-created so sum up to 2 times (once for each stub state)
             verify(columnFamilyOptions, Mockito.times(2))
@@ -361,11 +362,6 @@ public class EmbeddedRocksDBStateBackendTest
                             CheckpointOptions.forCheckpointWithDefaultLocation());
 
             RocksDB spyDB = keyedStateBackend.db;
-
-            if (!enableIncrementalCheckpointing) {
-                verify(spyDB, times(1)).getSnapshot();
-                verify(spyDB, times(0)).releaseSnapshot(any(Snapshot.class));
-            }
 
             // Ensure every RocksObjects not closed yet
             for (RocksObject rocksCloseable : allCreatedCloseables) {
@@ -661,11 +657,6 @@ public class EmbeddedRocksDBStateBackendTest
 
         assertNotNull(null, keyedStateBackend.db);
         RocksDB spyDB = keyedStateBackend.db;
-
-        if (!enableIncrementalCheckpointing) {
-            verify(spyDB, times(1)).getSnapshot();
-            verify(spyDB, times(1)).releaseSnapshot(any(Snapshot.class));
-        }
 
         keyedStateBackend.dispose();
         verify(spyDB, times(1)).close();

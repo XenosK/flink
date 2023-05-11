@@ -21,10 +21,12 @@ package org.apache.flink.runtime.scheduler;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.core.execution.CheckpointType;
 import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.queryablestate.KvStateID;
 import org.apache.flink.runtime.accumulators.AccumulatorSnapshot;
 import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
+import org.apache.flink.runtime.checkpoint.CompletedCheckpoint;
 import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.concurrent.ComponentMainThreadExecutor;
 import org.apache.flink.runtime.execution.ExecutionState;
@@ -33,6 +35,7 @@ import org.apache.flink.runtime.executiongraph.TaskExecutionStateTransition;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
 import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.jobgraph.JobGraph;
+import org.apache.flink.runtime.jobgraph.JobResourceRequirements;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobmanager.PartitionProducerDisposedException;
@@ -46,6 +49,7 @@ import org.apache.flink.runtime.operators.coordination.OperatorCoordinator;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
 import org.apache.flink.runtime.query.KvStateLocation;
 import org.apache.flink.runtime.query.UnknownKvStateLocation;
+import org.apache.flink.runtime.scheduler.adaptive.AdaptiveScheduler;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.taskmanager.TaskExecutionState;
 import org.apache.flink.util.AutoCloseableAsync;
@@ -125,7 +129,7 @@ public interface SchedulerNG extends GlobalFailureHandler, AutoCloseableAsync {
     CompletableFuture<String> triggerSavepoint(
             @Nullable String targetDirectory, boolean cancelJob, SavepointFormatType formatType);
 
-    CompletableFuture<String> triggerCheckpoint();
+    CompletableFuture<CompletedCheckpoint> triggerCheckpoint(CheckpointType checkpointType);
 
     void acknowledgeCheckpoint(
             JobID jobID,
@@ -183,4 +187,28 @@ public interface SchedulerNG extends GlobalFailureHandler, AutoCloseableAsync {
      */
     CompletableFuture<CoordinationResponse> deliverCoordinationRequestToCoordinator(
             OperatorID operator, CoordinationRequest request) throws FlinkException;
+
+    /**
+     * Read current {@link JobResourceRequirements job resource requirements}.
+     *
+     * @return Current resource requirements.
+     */
+    default JobResourceRequirements requestJobResourceRequirements() {
+        throw new UnsupportedOperationException(
+                String.format(
+                        "The %s does not support changing the parallelism without a job restart. This feature is currently only expected to work with the %s.",
+                        getClass().getSimpleName(), AdaptiveScheduler.class.getSimpleName()));
+    }
+
+    /**
+     * Update {@link JobResourceRequirements job resource requirements}.
+     *
+     * @param jobResourceRequirements new resource requirements
+     */
+    default void updateJobResourceRequirements(JobResourceRequirements jobResourceRequirements) {
+        throw new UnsupportedOperationException(
+                String.format(
+                        "The %s does not support changing the parallelism without a job restart. This feature is currently only expected to work with the %s.",
+                        getClass().getSimpleName(), AdaptiveScheduler.class.getSimpleName()));
+    }
 }

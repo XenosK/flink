@@ -24,12 +24,12 @@ import org.apache.flink.runtime.io.disk.NoOpFileChannelManager;
 import org.apache.flink.runtime.io.network.NettyShuffleEnvironment;
 import org.apache.flink.runtime.io.network.buffer.BufferPool;
 import org.apache.flink.runtime.io.network.buffer.NetworkBufferPool;
-import org.apache.flink.util.concurrent.Executors;
 import org.apache.flink.util.function.SupplierWithException;
 
 import java.io.IOException;
 import java.util.Optional;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 
 /** Utility class to encapsulate the logic of building a {@link ResultPartition} instance. */
 public class ResultPartitionBuilder {
@@ -47,6 +47,8 @@ public class ResultPartitionBuilder {
 
     private int numTargetKeyGroups = 1;
 
+    private boolean isBroadcast = false;
+
     private ResultPartitionManager partitionManager = new ResultPartitionManager();
 
     private FileChannelManager channelManager = NoOpFileChannelManager.INSTANCE;
@@ -56,7 +58,8 @@ public class ResultPartitionBuilder {
     private BatchShuffleReadBufferPool batchShuffleReadBufferPool =
             new BatchShuffleReadBufferPool(64 * 32 * 1024, 32 * 1024);
 
-    private ExecutorService batchShuffleReadIOExecutor = Executors.newDirectExecutorService();
+    private ScheduledExecutorService batchShuffleReadIOExecutor =
+            Executors.newSingleThreadScheduledExecutor();
 
     private int networkBuffersPerChannel = 1;
 
@@ -81,6 +84,10 @@ public class ResultPartitionBuilder {
     private String compressionCodec = "LZ4";
 
     private int maxOverdraftBuffersPerGate = 5;
+
+    private int hybridShuffleSpilledIndexSegmentSize = 256;
+
+    private long hybridShuffleNumRetainedInMemoryRegionsMax = Long.MAX_VALUE;
 
     public ResultPartitionBuilder setResultPartitionIndex(int partitionIndex) {
         this.partitionIndex = partitionIndex;
@@ -145,7 +152,7 @@ public class ResultPartitionBuilder {
     }
 
     public ResultPartitionBuilder setBatchShuffleReadIOExecutor(
-            ExecutorService batchShuffleReadIOExecutor) {
+            ScheduledExecutorService batchShuffleReadIOExecutor) {
         this.batchShuffleReadIOExecutor = batchShuffleReadIOExecutor;
         return this;
     }
@@ -210,6 +217,24 @@ public class ResultPartitionBuilder {
         return this;
     }
 
+    public ResultPartitionBuilder setBroadcast(boolean broadcast) {
+        isBroadcast = broadcast;
+        return this;
+    }
+
+    public ResultPartitionBuilder setHybridShuffleNumRetainedInMemoryRegionsMax(
+            long hybridShuffleNumRetainedInMemoryRegionsMax) {
+        this.hybridShuffleNumRetainedInMemoryRegionsMax =
+                hybridShuffleNumRetainedInMemoryRegionsMax;
+        return this;
+    }
+
+    public ResultPartitionBuilder setHybridShuffleSpilledIndexSegmentSize(
+            int hybridShuffleSpilledIndexSegmentSize) {
+        this.hybridShuffleSpilledIndexSegmentSize = hybridShuffleSpilledIndexSegmentSize;
+        return this;
+    }
+
     public ResultPartition build() {
         ResultPartitionFactory resultPartitionFactory =
                 new ResultPartitionFactory(
@@ -228,7 +253,9 @@ public class ResultPartitionBuilder {
                         sortShuffleMinBuffers,
                         sortShuffleMinParallelism,
                         sslEnabled,
-                        maxOverdraftBuffersPerGate);
+                        maxOverdraftBuffersPerGate,
+                        hybridShuffleSpilledIndexSegmentSize,
+                        hybridShuffleNumRetainedInMemoryRegionsMax);
 
         SupplierWithException<BufferPool, IOException> factory =
                 bufferPoolFactory.orElseGet(
@@ -243,6 +270,7 @@ public class ResultPartitionBuilder {
                 partitionType,
                 numberOfSubpartitions,
                 numTargetKeyGroups,
+                isBroadcast,
                 factory);
     }
 }

@@ -61,6 +61,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 
 /** Implementation of {@link ResourceManagerDriver} for Kubernetes deployment. */
@@ -164,7 +166,8 @@ public class KubernetesResourceManagerDriver
     public CompletableFuture<KubernetesWorkerNode> requestResource(
             TaskExecutorProcessSpec taskExecutorProcessSpec) {
         final KubernetesTaskManagerParameters parameters =
-                createKubernetesTaskManagerParameters(taskExecutorProcessSpec);
+                createKubernetesTaskManagerParameters(
+                        taskExecutorProcessSpec, getBlockedNodeRetriever().getAllBlockedNodeIds());
         final KubernetesPod taskManagerPod =
                 KubernetesTaskManagerFactory.buildTaskManagerKubernetesPod(
                         taskManagerPodTemplate, parameters);
@@ -197,11 +200,42 @@ public class KubernetesResourceManagerDriver
                                     future.completeExceptionally(exception);
                                 }
                             } else {
-                                log.info("Pod {} is created.", podName);
+                                if (requestResourceFuture.isCancelled()) {
+                                    stopPod(podName);
+                                    log.info(
+                                            "pod {} is cancelled before create pod finish, stop it.",
+                                            podName);
+                                } else {
+                                    log.info("Pod {} is created.", podName);
+                                }
                             }
                             return null;
                         },
                         getMainThreadExecutor()));
+
+        FutureUtils.assertNoException(
+                requestResourceFuture.handle(
+                        (ignore, t) -> {
+                            if (t == null) {
+                                return null;
+                            }
+                            if (t instanceof CancellationException) {
+
+                                requestResourceFutures.remove(taskManagerPod.getName());
+                                if (createPodFuture.isDone()) {
+                                    log.info(
+                                            "pod {} is cancelled before scheduled, stop it.",
+                                            podName);
+                                    stopPod(taskManagerPod.getName());
+                                }
+                            } else if (t instanceof RetryableException) {
+                                // ignore
+                            } else {
+                                log.error("Error completing resource request.", t);
+                                ExceptionUtils.rethrow(t);
+                            }
+                            return null;
+                        }));
 
         return requestResourceFuture;
     }
@@ -279,7 +313,7 @@ public class KubernetesResourceManagerDriver
     }
 
     private KubernetesTaskManagerParameters createKubernetesTaskManagerParameters(
-            TaskExecutorProcessSpec taskExecutorProcessSpec) {
+            TaskExecutorProcessSpec taskExecutorProcessSpec, Set<String> blockedNodes) {
         final String podName =
                 String.format(
                         TASK_MANAGER_POD_FORMAT, clusterId, currentMaxAttemptId, ++currentMaxPodId);
@@ -302,15 +336,19 @@ public class KubernetesResourceManagerDriver
                 taskManagerParameters,
                 ExternalResourceUtils.getExternalResourceConfigurationKeys(
                         flinkConfig,
-                        KubernetesConfigOptions.EXTERNAL_RESOURCE_KUBERNETES_CONFIG_KEY_SUFFIX));
+                        KubernetesConfigOptions.EXTERNAL_RESOURCE_KUBERNETES_CONFIG_KEY_SUFFIX),
+                blockedNodes);
     }
 
-    private void handlePodEventsInMainThread(List<KubernetesPod> pods) {
+    private void handlePodEventsInMainThread(List<KubernetesPod> pods, PodEvent podEvent) {
         getMainThreadExecutor()
                 .execute(
                         () -> {
                             for (KubernetesPod pod : pods) {
-                                if (pod.isTerminated()) {
+                                // we should also handle the deleted event to avoid situations where
+                                // the pod itself doesn't reflect the status correctly (i.e. pod
+                                // removed during the pending phase).
+                                if (podEvent == PodEvent.DELETED || pod.isTerminated()) {
                                     onPodTerminated(pod);
                                 } else if (pod.isScheduled()) {
                                     onPodScheduled(pod);
@@ -343,7 +381,8 @@ public class KubernetesResourceManagerDriver
                 requestResourceFutures.remove(podName);
         if (requestResourceFuture != null) {
             log.warn("Pod {} is terminated before being scheduled.", podName);
-            requestResourceFuture.completeExceptionally(new FlinkException("Pod is terminated."));
+            requestResourceFuture.completeExceptionally(
+                    new RetryableException("Pod is terminated."));
         }
 
         getResourceEventHandler()
@@ -380,22 +419,22 @@ public class KubernetesResourceManagerDriver
             implements FlinkKubeClient.WatchCallbackHandler<KubernetesPod> {
         @Override
         public void onAdded(List<KubernetesPod> pods) {
-            handlePodEventsInMainThread(pods);
+            handlePodEventsInMainThread(pods, PodEvent.ADDED);
         }
 
         @Override
         public void onModified(List<KubernetesPod> pods) {
-            handlePodEventsInMainThread(pods);
+            handlePodEventsInMainThread(pods, PodEvent.MODIFIED);
         }
 
         @Override
         public void onDeleted(List<KubernetesPod> pods) {
-            handlePodEventsInMainThread(pods);
+            handlePodEventsInMainThread(pods, PodEvent.DELETED);
         }
 
         @Override
         public void onError(List<KubernetesPod> pods) {
-            handlePodEventsInMainThread(pods);
+            handlePodEventsInMainThread(pods, PodEvent.ERROR);
         }
 
         @Override
@@ -418,5 +457,21 @@ public class KubernetesResourceManagerDriver
                 getResourceEventHandler().onError(throwable);
             }
         }
+    }
+
+    private static class RetryableException extends FlinkException {
+        private static final long serialVersionUID = 1L;
+
+        RetryableException(String message) {
+            super(message);
+        }
+    }
+
+    /** Internal type of the pod event. */
+    private enum PodEvent {
+        ADDED,
+        MODIFIED,
+        DELETED,
+        ERROR
     }
 }

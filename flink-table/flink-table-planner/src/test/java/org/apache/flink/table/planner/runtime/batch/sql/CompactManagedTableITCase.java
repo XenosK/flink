@@ -71,7 +71,7 @@ public class CompactManagedTableITCase extends BatchTestBase {
 
     @Override
     @Before
-    public void before() {
+    public void before() throws Exception {
         super.before();
         MANAGED_TABLES.put(tableIdentifier, new AtomicReference<>());
         referenceOfManagedTableFileEntries = new AtomicReference<>();
@@ -79,7 +79,7 @@ public class CompactManagedTableITCase extends BatchTestBase {
         try {
             rootPath =
                     new Path(
-                            new Path(TEMPORARY_FOLDER.newFolder().getPath()),
+                            new Path(createTempFolder().getPath()),
                             tableIdentifier.asSummaryString());
             rootPath.getFileSystem().mkdirs(rootPath);
         } catch (IOException e) {

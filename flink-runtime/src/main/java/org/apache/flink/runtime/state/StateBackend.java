@@ -50,8 +50,7 @@ import java.util.Collection;
  *
  * <h2>Raw Bytes Storage and Backends</h2>
  *
- * <p>The {@code StateBackend} creates services for for <i>keyed state</i> and <i>operator
- * state</i>.
+ * <p>The {@code StateBackend} creates services for <i>keyed state</i> and <i>operator state</i>.
  *
  * <p>The {@link CheckpointableKeyedStateBackend} and {@link OperatorStateBackend} created by this
  * state backend define how to hold the working state for keys and operators. They also define how
@@ -79,6 +78,15 @@ import java.util.Collection;
  */
 @PublicEvolving
 public interface StateBackend extends java.io.Serializable {
+
+    /**
+     * Return the name of this backend, default is simple class name. {@link
+     * org.apache.flink.runtime.state.delegate.DelegatingStateBackend} may return the simple class
+     * name of the delegated backend.
+     */
+    default String getName() {
+        return this.getClass().getSimpleName();
+    }
 
     /**
      * Creates a new {@link CheckpointableKeyedStateBackend} that is responsible for holding

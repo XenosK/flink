@@ -160,7 +160,7 @@ def get_jvm_opts(env):
 
     # Remove leading and ending double quotes (if present) of value
     jvm_opts = jvm_opts.strip("\"")
-    return jvm_opts
+    return jvm_opts.split(" ")
 
 
 def construct_flink_classpath(env):
@@ -213,16 +213,9 @@ def construct_hadoop_classpath(env):
 
 def construct_test_classpath():
     test_jar_patterns = [
-        "flink-runtime/target/flink-runtime*tests.jar",
-        "flink-streaming-java/target/flink-streaming-java*tests.jar",
-        "flink-formats/flink-csv/target/flink-csv*.jar",
-        "flink-formats/flink-sql-avro/target/flink-sql-avro*.jar",
-        "flink-formats/flink-json/target/flink-json*.jar",
-        "flink-connectors/flink-sql-connector-kafka/target/flink-sql-connector-kafka*.jar",
+        "flink-python/target/test-dependencies/*",
         "flink-python/target/artifacts/testDataStream.jar",
         "flink-python/target/flink-python*-tests.jar",
-        ("flink-state-backends/flink-statebackend-rocksdb/target/"
-         "flink-statebackend-rocksdb*tests.jar"),
     ]
     test_jars = []
     flink_source_root = _find_flink_source_root()
@@ -256,7 +249,7 @@ def launch_gateway_server_process(env, args):
             [construct_flink_classpath(env), construct_hadoop_classpath(env)])
         if "FLINK_TESTING" in env:
             classpath = os.pathsep.join([classpath, construct_test_classpath()])
-        command = [java_executable, jvm_args, jvm_opts] + log_settings \
+        command = [java_executable, jvm_args] + jvm_opts + log_settings \
             + ["-cp", classpath, program_args.main_class] + program_args.other_args
     else:
         command = [os.path.join(env["FLINK_BIN_DIR"], "flink"), "run"] + program_args.other_args \
@@ -268,7 +261,7 @@ def launch_gateway_server_process(env, args):
             signal.signal(signal.SIGINT, signal.SIG_IGN)
         preexec_fn = preexec_func
     return Popen(list(filter(lambda c: len(c) != 0, command)),
-                 stdin=PIPE, preexec_fn=preexec_fn, env=env)
+                 stdin=PIPE, stderr=PIPE, preexec_fn=preexec_fn, env=env)
 
 
 if __name__ == "__main__":

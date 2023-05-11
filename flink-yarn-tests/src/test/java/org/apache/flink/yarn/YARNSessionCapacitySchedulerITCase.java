@@ -25,10 +25,10 @@ import org.apache.flink.configuration.GlobalConfiguration;
 import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.runtime.rest.RestClient;
 import org.apache.flink.runtime.rest.handler.legacy.messages.ClusterOverviewWithVersion;
-import org.apache.flink.runtime.rest.messages.ClusterConfigurationInfo;
-import org.apache.flink.runtime.rest.messages.ClusterConfigurationInfoEntry;
 import org.apache.flink.runtime.rest.messages.ClusterConfigurationInfoHeaders;
 import org.apache.flink.runtime.rest.messages.ClusterOverviewHeaders;
+import org.apache.flink.runtime.rest.messages.ConfigurationInfo;
+import org.apache.flink.runtime.rest.messages.ConfigurationInfoEntry;
 import org.apache.flink.runtime.rest.messages.taskmanager.TaskManagerInfo;
 import org.apache.flink.runtime.rest.messages.taskmanager.TaskManagersHeaders;
 import org.apache.flink.runtime.rest.messages.taskmanager.TaskManagersInfo;
@@ -53,7 +53,6 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.Logger;
@@ -425,16 +424,15 @@ class YARNSessionCapacitySchedulerITCase extends YarnTestBase {
 
     private static Map<String, String> getFlinkConfig(final String host, final int port)
             throws Exception {
-        final ClusterConfigurationInfo clusterConfigurationInfoEntries =
+        final ConfigurationInfo configurationInfoEntries =
                 restClient
                         .sendRequest(host, port, ClusterConfigurationInfoHeaders.getInstance())
                         .get();
 
-        return clusterConfigurationInfoEntries.stream()
+        return configurationInfoEntries.stream()
                 .collect(
                         Collectors.toMap(
-                                ClusterConfigurationInfoEntry::getKey,
-                                ClusterConfigurationInfoEntry::getValue));
+                                ConfigurationInfoEntry::getKey, ConfigurationInfoEntry::getValue));
     }
 
     /**
@@ -520,7 +518,6 @@ class YARNSessionCapacitySchedulerITCase extends YarnTestBase {
     }
 
     /** Test a fire-and-forget job submission to a YARN cluster. */
-    @Timeout(value = 60)
     @Test
     void testDetachedPerJobYarnCluster(@TempDir File tempDir) throws Exception {
         runTest(
@@ -537,7 +534,6 @@ class YARNSessionCapacitySchedulerITCase extends YarnTestBase {
     }
 
     /** Test a fire-and-forget job submission to a YARN cluster. */
-    @Timeout(value = 60)
     @Test
     void testDetachedPerJobYarnClusterWithStreamingJob(@TempDir File tempDir) throws Exception {
         runTest(

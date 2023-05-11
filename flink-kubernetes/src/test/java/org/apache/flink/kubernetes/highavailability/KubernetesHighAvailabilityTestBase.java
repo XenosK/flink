@@ -156,13 +156,12 @@ class KubernetesHighAvailabilityTestBase {
                             watchCallbackExecutorService,
                             leaderConfig);
             return factory.createLeaderElectionDriver(
-                    electionEventHandler, electionEventHandler::handleError, LEADER_ADDRESS);
+                    electionEventHandler, electionEventHandler::handleError);
         }
 
         private LeaderRetrievalDriver createLeaderRetrievalDriver() {
             final KubernetesLeaderRetrievalDriverFactory factory =
                     new KubernetesLeaderRetrievalDriverFactory(
-                            flinkKubeClient,
                             kubernetesTestFixture.getConfigMapSharedWatcher(),
                             watchCallbackExecutorService,
                             LEADER_CONFIGMAP_NAME);

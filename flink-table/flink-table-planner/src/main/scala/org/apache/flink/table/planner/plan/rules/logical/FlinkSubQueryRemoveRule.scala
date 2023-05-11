@@ -17,10 +17,12 @@
  */
 package org.apache.flink.table.planner.plan.rules.logical
 
+import org.apache.flink.table.planner.alias.ClearJoinHintWithInvalidPropagationShuttle
 import org.apache.flink.table.planner.calcite.{FlinkRelBuilder, FlinkRelFactories}
+import org.apache.flink.table.planner.hint.FlinkHints
 
 import com.google.common.collect.ImmutableList
-import org.apache.calcite.plan.{RelOptRule, RelOptRuleCall, RelOptRuleOperand}
+import org.apache.calcite.plan.{RelOptRule, RelOptRuleCall, RelOptRuleOperand, RelOptUtil}
 import org.apache.calcite.plan.RelOptRule._
 import org.apache.calcite.plan.RelOptUtil.Logic
 import org.apache.calcite.rel.{RelNode, RelShuttleImpl}
@@ -93,7 +95,14 @@ class FlinkSubQueryRemoveRule(
           relBuilder.filter(c)
         }
         relBuilder.project(fields(relBuilder, filter.getRowType.getFieldCount))
-        call.transformTo(relBuilder.build)
+        // the sub query has been replaced with a common node,
+        // so hints in it should also be resolved with the same logic in SqlToRelConverter
+        val newNode = relBuilder.build
+        val nodeWithHint = RelOptUtil.propagateRelHints(newNode, false)
+        val nodeWithCapitalizedJoinHints = FlinkHints.capitalizeJoinHints(nodeWithHint)
+        val finalNode =
+          nodeWithCapitalizedJoinHints.accept(new ClearJoinHintWithInvalidPropagationShuttle)
+        call.transformTo(finalNode)
       case _ => // do nothing
     }
   }
@@ -295,13 +304,13 @@ class FlinkSubQueryRemoveRule(
       replacement: RexNode): RexNode = {
     condition.accept(new RexShuttle() {
       override def visitSubQuery(subQuery: RexSubQuery): RexNode = {
-        if (RexUtil.eq(subQuery, oldSubQueryCall)) replacement else subQuery
+        if (subQuery.equals(oldSubQueryCall)) replacement else subQuery
       }
 
       override def visitCall(call: RexCall): RexNode = {
         call.getKind match {
           case SqlKind.NOT if call.operands.head.isInstanceOf[RexSubQuery] =>
-            if (RexUtil.eq(call, oldSubQueryCall)) replacement else call
+            if (call.equals(oldSubQueryCall)) replacement else call
           case _ =>
             super.visitCall(call)
         }

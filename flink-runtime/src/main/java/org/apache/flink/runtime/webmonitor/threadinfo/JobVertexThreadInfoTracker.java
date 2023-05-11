@@ -22,6 +22,7 @@ import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.runtime.execution.ExecutionState;
+import org.apache.flink.runtime.executiongraph.AccessExecution;
 import org.apache.flink.runtime.executiongraph.AccessExecutionJobVertex;
 import org.apache.flink.runtime.executiongraph.AccessExecutionVertex;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
@@ -76,7 +77,7 @@ public class JobVertexThreadInfoTracker<T extends Statistics> implements JobVert
     @GuardedBy("lock")
     private final ThreadInfoRequestCoordinator coordinator;
 
-    private final Function<JobVertexThreadInfoStats, T> createStatsFn;
+    private final Function<VertexThreadInfoStats, T> createStatsFn;
 
     private final ExecutorService executor;
 
@@ -107,7 +108,7 @@ public class JobVertexThreadInfoTracker<T extends Statistics> implements JobVert
     JobVertexThreadInfoTracker(
             ThreadInfoRequestCoordinator coordinator,
             GatewayRetriever<ResourceManagerGateway> resourceManagerGatewayRetriever,
-            Function<JobVertexThreadInfoStats, T> createStatsFn,
+            Function<VertexThreadInfoStats, T> createStatsFn,
             ScheduledExecutorService executor,
             Duration cleanUpInterval,
             int numSamples,
@@ -192,7 +193,7 @@ public class JobVertexThreadInfoTracker<T extends Statistics> implements JobVert
             final CompletableFuture<ResourceManagerGateway> gatewayFuture =
                     resourceManagerGatewayRetriever.getFuture();
 
-            CompletableFuture<JobVertexThreadInfoStats> sample =
+            CompletableFuture<VertexThreadInfoStats> sample =
                     gatewayFuture.thenCompose(
                             (ResourceManagerGateway resourceManagerGateway) ->
                                     coordinator.triggerThreadInfoRequest(
@@ -257,22 +258,25 @@ public class JobVertexThreadInfoTracker<T extends Statistics> implements JobVert
                         executionVertex.getExecutionState());
                 continue;
             }
-            TaskManagerLocation tmLocation = executionVertex.getCurrentAssignedResourceLocation();
-            if (tmLocation == null) {
-                LOG.trace("ExecutionVertex {} is currently not assigned", executionVertex);
-                continue;
-            }
-            Set<ExecutionAttemptID> groupedAttemptIds =
-                    executionAttemptsByLocation.getOrDefault(tmLocation, new HashSet<>());
+            for (AccessExecution execution : executionVertex.getCurrentExecutions()) {
+                TaskManagerLocation tmLocation = execution.getAssignedResourceLocation();
+                if (tmLocation == null) {
+                    LOG.trace("ExecutionVertex {} is currently not assigned", executionVertex);
+                    continue;
+                }
+                Set<ExecutionAttemptID> groupedAttemptIds =
+                        executionAttemptsByLocation.getOrDefault(tmLocation, new HashSet<>());
 
-            ExecutionAttemptID attemptId =
-                    executionVertex.getCurrentExecutionAttempt().getAttemptId();
-            groupedAttemptIds.add(attemptId);
-            executionAttemptsByLocation.put(tmLocation, ImmutableSet.copyOf(groupedAttemptIds));
+                ExecutionAttemptID attemptId = execution.getAttemptId();
+                groupedAttemptIds.add(attemptId);
+                executionAttemptsByLocation.put(tmLocation, groupedAttemptIds);
+            }
         }
 
         return executionAttemptsByLocation.entrySet().stream()
-                .collect(Collectors.toMap(e -> e.getKey(), e -> ImmutableSet.copyOf(e.getValue())));
+                .collect(
+                        Collectors.toMap(
+                                Map.Entry::getKey, e -> ImmutableSet.copyOf(e.getValue())));
     }
 
     @VisibleForTesting
@@ -330,7 +334,7 @@ public class JobVertexThreadInfoTracker<T extends Statistics> implements JobVert
 
     /** Callback on completed thread info sample. */
     private class ThreadInfoSampleCompletionCallback
-            implements BiConsumer<JobVertexThreadInfoStats, Throwable> {
+            implements BiConsumer<VertexThreadInfoStats, Throwable> {
 
         private final Key key;
         private final AccessExecutionJobVertex vertex;
@@ -341,7 +345,7 @@ public class JobVertexThreadInfoTracker<T extends Statistics> implements JobVert
         }
 
         @Override
-        public void accept(JobVertexThreadInfoStats threadInfoStats, Throwable throwable) {
+        public void accept(VertexThreadInfoStats threadInfoStats, Throwable throwable) {
             synchronized (lock) {
                 try {
                     if (shutDown) {
@@ -351,7 +355,7 @@ public class JobVertexThreadInfoTracker<T extends Statistics> implements JobVert
                         vertexStatsCache.put(key, createStatsFn.apply(threadInfoStats));
                         resultAvailableFuture.complete(null);
                     } else {
-                        LOG.debug(
+                        LOG.error(
                                 "Failed to gather a thread info sample for {}",
                                 vertex.getName(),
                                 throwable);

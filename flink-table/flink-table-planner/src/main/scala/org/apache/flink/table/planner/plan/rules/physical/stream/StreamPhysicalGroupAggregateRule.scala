@@ -29,23 +29,19 @@ import org.apache.flink.table.planner.plan.utils.WindowUtil
 import org.apache.calcite.plan.{RelOptRule, RelOptRuleCall}
 import org.apache.calcite.rel.RelNode
 import org.apache.calcite.rel.convert.ConverterRule
+import org.apache.calcite.rel.convert.ConverterRule.Config
 import org.apache.calcite.rel.core.Aggregate.Group
 
 import scala.collection.JavaConversions._
 
 /** Rule to convert a [[FlinkLogicalAggregate]] into a [[StreamPhysicalGroupAggregate]]. */
-class StreamPhysicalGroupAggregateRule
-  extends ConverterRule(
-    classOf[FlinkLogicalAggregate],
-    FlinkConventions.LOGICAL,
-    FlinkConventions.STREAM_PHYSICAL,
-    "StreamPhysicalGroupAggregateRule") {
+class StreamPhysicalGroupAggregateRule(config: Config) extends ConverterRule(config) {
 
   override def matches(call: RelOptRuleCall): Boolean = {
     val agg: FlinkLogicalAggregate = call.rel(0)
 
     // check if we have grouping sets
-    if (agg.getGroupType != Group.SIMPLE || agg.indicator) {
+    if (agg.getGroupType != Group.SIMPLE) {
       throw new TableException("GROUPING SETS are currently not supported.")
     }
 
@@ -86,5 +82,10 @@ class StreamPhysicalGroupAggregateRule
 }
 
 object StreamPhysicalGroupAggregateRule {
-  val INSTANCE: RelOptRule = new StreamPhysicalGroupAggregateRule
+  val INSTANCE: RelOptRule = new StreamPhysicalGroupAggregateRule(
+    Config.INSTANCE.withConversion(
+      classOf[FlinkLogicalAggregate],
+      FlinkConventions.LOGICAL,
+      FlinkConventions.STREAM_PHYSICAL,
+      "StreamPhysicalGroupAggregateRule"))
 }

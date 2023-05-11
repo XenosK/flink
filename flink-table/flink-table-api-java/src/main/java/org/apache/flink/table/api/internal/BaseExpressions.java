@@ -54,7 +54,11 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ABS;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ACOS;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.AND;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_CONTAINS;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_DISTINCT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_ELEMENT;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_POSITION;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_REMOVE;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_REVERSE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ASCII;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ASIN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.AT;
@@ -92,6 +96,7 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IF;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IF_NULL;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.INIT_CAP;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.INSTR;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IS_FALSE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IS_JSON;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IS_NOT_FALSE;
@@ -103,16 +108,21 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.JSON_E
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.JSON_QUERY;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.JSON_VALUE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LAST_VALUE;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LEFT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LESS_THAN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LESS_THAN_OR_EQUAL;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LIKE;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LISTAGG;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LN;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LOCATE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LOG;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LOG10;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LOG2;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LOWER;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LPAD;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LTRIM;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_KEYS;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_VALUES;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAX;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MD5;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MIN;
@@ -126,15 +136,19 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ORDER_
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ORDER_DESC;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.OVER;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.OVERLAY;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.PARSE_URL;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.PLUS;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.POSITION;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.POWER;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.PROCTIME;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.RADIANS;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.REGEXP;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.REGEXP_EXTRACT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.REGEXP_REPLACE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.REPEAT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.REPLACE;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.REVERSE;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.RIGHT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ROUND;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ROWTIME;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.RPAD;
@@ -149,9 +163,12 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.SIGN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.SIMILAR;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.SIN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.SINH;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.SPLIT_INDEX;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.SQRT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.STDDEV_POP;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.STDDEV_SAMP;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.STR_TO_MAP;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.SUBSTR;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.SUBSTRING;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.SUM;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.SUM0;
@@ -459,6 +476,24 @@ public abstract class BaseExpressions<InType, OutType> {
     /** Returns the last value of field across all input values. */
     public OutType lastValue() {
         return toApiSpecificExpression(unresolvedCall(LAST_VALUE, toExpr()));
+    }
+
+    /**
+     * Concatenates the values of string expressions and places separator(,) values between them.
+     * The separator is not added at the end of string.
+     */
+    public OutType listAgg() {
+        return toApiSpecificExpression(unresolvedCall(LISTAGG, toExpr(), valueLiteral(",")));
+    }
+
+    /**
+     * Concatenates the values of string expressions and places separator values between them. The
+     * separator is not added at the end of string. The default value of separator is ‘,’.
+     *
+     * @param separator string containing the character
+     */
+    public OutType listAgg(String separator) {
+        return toApiSpecificExpression(unresolvedCall(LISTAGG, toExpr(), valueLiteral(separator)));
     }
 
     /** Returns the population standard deviation of an expression (the square root of varPop()). */
@@ -772,6 +807,31 @@ public abstract class BaseExpressions<InType, OutType> {
                 unresolvedCall(SUBSTRING, toExpr(), objectToExpression(beginIndex)));
     }
 
+    /**
+     * Creates a substring of the given string at given index for a given length.
+     *
+     * @param beginIndex first character of the substring (starting at 1, inclusive)
+     * @param length number of characters of the substring
+     */
+    public OutType substr(InType beginIndex, InType length) {
+        return toApiSpecificExpression(
+                unresolvedCall(
+                        SUBSTR,
+                        toExpr(),
+                        objectToExpression(beginIndex),
+                        objectToExpression(length)));
+    }
+
+    /**
+     * Creates a substring of the given string beginning at the given index to the end.
+     *
+     * @param beginIndex first character of the substring (starting at 1, inclusive)
+     */
+    public OutType substr(InType beginIndex) {
+        return toApiSpecificExpression(
+                unresolvedCall(SUBSTR, toExpr(), objectToExpression(beginIndex)));
+    }
+
     /** Removes leading space characters from the given string. */
     public OutType trimLeading() {
         return toApiSpecificExpression(
@@ -986,6 +1046,14 @@ public abstract class BaseExpressions<InType, OutType> {
     }
 
     /**
+     * Returns TRUE if any (possibly empty) substring matches the Java regular expression, otherwise
+     * FALSE. Returns NULL if any of arguments is NULL.
+     */
+    public OutType regexp(InType regex) {
+        return toApiSpecificExpression(unresolvedCall(REGEXP, toExpr(), objectToExpression(regex)));
+    }
+
+    /**
      * Returns a string with all substrings that match the regular expression consecutively being
      * replaced.
      */
@@ -1048,6 +1116,52 @@ public abstract class BaseExpressions<InType, OutType> {
                 unresolvedCall(ENCODE, toExpr(), objectToExpression(charset)));
     }
 
+    /** Returns the leftmost integer characters from the input string. */
+    public OutType left(InType len) {
+        return toApiSpecificExpression(unresolvedCall(LEFT, toExpr(), objectToExpression(len)));
+    }
+
+    /** Returns the rightmost integer characters from the input string. */
+    public OutType right(InType len) {
+        return toApiSpecificExpression(unresolvedCall(RIGHT, toExpr(), objectToExpression(len)));
+    }
+
+    /** Returns the position of the first occurrence of the input string. */
+    public OutType instr(InType str) {
+        return toApiSpecificExpression(unresolvedCall(INSTR, toExpr(), objectToExpression(str)));
+    }
+
+    /** Returns the position of the first occurrence in the input string. */
+    public OutType locate(InType str) {
+        return toApiSpecificExpression(unresolvedCall(LOCATE, toExpr(), objectToExpression(str)));
+    }
+
+    /** Returns the position of the first occurrence in the input string after position integer. */
+    public OutType locate(InType str, InType pos) {
+        return toApiSpecificExpression(
+                unresolvedCall(LOCATE, toExpr(), objectToExpression(str), objectToExpression(pos)));
+    }
+
+    /**
+     * Parse url and return various parameter of the URL. If accept any null arguments, return null.
+     */
+    public OutType parseUrl(InType partToExtract) {
+        return toApiSpecificExpression(
+                unresolvedCall(PARSE_URL, toExpr(), objectToExpression(partToExtract)));
+    }
+
+    /**
+     * Parse url and return various parameter of the URL. If accept any null arguments, return null.
+     */
+    public OutType parseUrl(InType partToExtract, InType key) {
+        return toApiSpecificExpression(
+                unresolvedCall(
+                        PARSE_URL,
+                        toExpr(),
+                        objectToExpression(partToExtract),
+                        objectToExpression(key)));
+    }
+
     /** Returns a string that removes the left whitespaces from the given string. */
     public OutType ltrim() {
         return toApiSpecificExpression(unresolvedCall(LTRIM, toExpr()));
@@ -1061,6 +1175,61 @@ public abstract class BaseExpressions<InType, OutType> {
     /** Returns a string that repeats the base string n times. */
     public OutType repeat(InType n) {
         return toApiSpecificExpression(unresolvedCall(REPEAT, toExpr(), objectToExpression(n)));
+    }
+
+    /**
+     * Reverse each character in current string.
+     *
+     * @return a new string which character order is reverse to current string.
+     */
+    public OutType reverse() {
+        return toApiSpecificExpression(unresolvedCall(REVERSE, toExpr()));
+    }
+
+    /**
+     * Split target string with custom separator and pick the index-th(start with 0) result.
+     *
+     * @param separator custom separator.
+     * @param index index of the result which you want.
+     * @return the string at the index of split results.
+     */
+    public OutType splitIndex(InType separator, InType index) {
+        return toApiSpecificExpression(
+                unresolvedCall(
+                        SPLIT_INDEX,
+                        toExpr(),
+                        objectToExpression(separator),
+                        objectToExpression(index)));
+    }
+
+    /**
+     * Creates a map by parsing text. Split text into key-value pairs using two delimiters. The
+     * first delimiter separates pairs, and the second delimiter separates key and value. If only
+     * one parameter is given, default delimiters are used: ',' as delimiter1 and '=' as delimiter2.
+     * Both delimiters are treated as regular expressions.
+     *
+     * @return the map
+     */
+    public OutType strToMap() {
+        return toApiSpecificExpression(unresolvedCall(STR_TO_MAP, toExpr()));
+    }
+
+    /**
+     * Creates a map by parsing text. Split text into key-value pairs using two delimiters. The
+     * first delimiter separates pairs, and the second delimiter separates key and value. Both
+     * {@code listDelimiter} and {@code keyValueDelimiter} are treated as regular expressions.
+     *
+     * @param listDelimiter the delimiter to separates pairs
+     * @param keyValueDelimiter the delimiter to separates key and value
+     * @return the map
+     */
+    public OutType strToMap(InType listDelimiter, InType keyValueDelimiter) {
+        return toApiSpecificExpression(
+                unresolvedCall(
+                        STR_TO_MAP,
+                        toExpr(),
+                        objectToExpression(listDelimiter),
+                        objectToExpression(keyValueDelimiter)));
     }
 
     // Temporal operations
@@ -1184,6 +1353,57 @@ public abstract class BaseExpressions<InType, OutType> {
     public OutType arrayContains(InType needle) {
         return toApiSpecificExpression(
                 unresolvedCall(ARRAY_CONTAINS, toExpr(), objectToExpression(needle)));
+    }
+
+    /**
+     * Returns an array with unique elements.
+     *
+     * <p>If the array itself is null, the function will return null. Keeps ordering of elements.
+     */
+    public OutType arrayDistinct() {
+        return toApiSpecificExpression(unresolvedCall(ARRAY_DISTINCT, toExpr()));
+    }
+
+    /**
+     * Returns the position of the first occurrence of element in the given array as int. Returns 0
+     * if the given value could not be found in the array. Returns null if either of the arguments
+     * are null
+     *
+     * <p>NOTE: that this is not zero based, but 1-based index. The first element in the array has
+     * index 1.
+     */
+    public OutType arrayPosition(InType needle) {
+        return toApiSpecificExpression(
+                unresolvedCall(ARRAY_POSITION, toExpr(), objectToExpression(needle)));
+    }
+
+    /**
+     * Removes all elements that equal to element from array.
+     *
+     * <p>If the array itself is null, the function will return null. Keeps ordering of elements.
+     */
+    public OutType arrayRemove(InType needle) {
+        return toApiSpecificExpression(
+                unresolvedCall(ARRAY_REMOVE, toExpr(), objectToExpression(needle)));
+    }
+
+    /**
+     * Returns an array in reverse order.
+     *
+     * <p>If the array itself is null, the function will return null.
+     */
+    public OutType arrayReverse() {
+        return toApiSpecificExpression(unresolvedCall(ARRAY_REVERSE, toExpr()));
+    }
+
+    /** Returns the keys of the map as an array. */
+    public OutType mapKeys() {
+        return toApiSpecificExpression(unresolvedCall(MAP_KEYS, toExpr()));
+    }
+
+    /** Returns the values of the map as an array. */
+    public OutType mapValues() {
+        return toApiSpecificExpression(unresolvedCall(MAP_VALUES, toExpr()));
     }
 
     // Time definition

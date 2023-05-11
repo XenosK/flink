@@ -58,10 +58,6 @@ CREATE TABLE MyUserTable (
 请确保包含 [Flink File System specific dependencies]({{< ref "docs/deployment/filesystems/overview" >}})。
 {{< /hint >}}
 
-{{< hint info >}}
-基于流的文件系统 sources 仍在开发中。未来，社区将增加对常见地流式用例的支持，例如，对分区和目录的监控等。
-{{< /hint >}}
-
 {{< hint warning >}}
 文件系统连接器的特性与 `previous legacy filesystem connector` 有很大不同：
 path 属性指定的是目录，而不是文件，该目录下的文件也不是肉眼可读的。
@@ -115,9 +111,9 @@ path
 
 ### 目录监控
 
-当运行模式为流模式时，文件系统连接器会自动监控输入目录。
+默认情况下，文件系统连接器是有界的，也就是只会扫描配置路径一遍后就会停止。
 
-可以使用以下属性修改监控时间间隔。
+如果需要，可以通过设置 `source.monitor-interval` 属性来开启目录监控，以便在新文件出现时继续扫描。
 
 <table class="table table-bordered">
   <thead>
@@ -280,7 +276,7 @@ file sink 支持文件合并，允许应用程序使用较小的 checkpoint 间�
 如果启用文件合并功能，会根据目标文件大小，将多个小文件合并成大文件。
 在生产环境中使用文件合并功能时，需要注意：
 - 只有 checkpoint 内部的文件才会被合并，至少生成的文件个数与 checkpoint 个数相同。
-- 合并前文件是可见的，那么文件的可见时间是：checkpoint 间隔时长 + 合并时长。
+- 合并前文件是不可见的，那么文件的可见时间是：checkpoint 间隔时长 + 合并时长。
 - 如果合并时间过长，将导致反压，延长 checkpoint 所需时间。
 
 <a name="partition-commit"></a>

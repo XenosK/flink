@@ -101,11 +101,24 @@ public class RocksDBStateBackendConfigTest {
         final File logFile = File.createTempFile(getClass().getSimpleName() + "-", ".log");
         // set the environment variable 'log.file' with the Flink log file location
         System.setProperty("log.file", logFile.getPath());
-        try (RocksDBResourceContainer container = backend.createOptionsAndResourceContainer()) {
+        try (RocksDBResourceContainer container = backend.createOptionsAndResourceContainer(null)) {
             assertEquals(
                     RocksDBConfigurableOptions.LOG_LEVEL.defaultValue(),
                     container.getDbOptions().infoLogLevel());
             assertEquals(logFile.getParent(), container.getDbOptions().dbLogDir());
+        } finally {
+            logFile.delete();
+        }
+
+        StringBuilder longInstanceBasePath =
+                new StringBuilder(tempFolder.newFolder().getAbsolutePath());
+        while (longInstanceBasePath.length() < 255) {
+            longInstanceBasePath.append("/append-for-long-path");
+        }
+        try (RocksDBResourceContainer container =
+                backend.createOptionsAndResourceContainer(
+                        new File(longInstanceBasePath.toString()))) {
+            assertTrue(container.getDbOptions().dbLogDir().isEmpty());
         } finally {
             logFile.delete();
         }
@@ -531,7 +544,7 @@ public class RocksDBStateBackendConfigTest {
 
             try (RocksDBResourceContainer optionsContainer =
                     new RocksDBResourceContainer(
-                            configuration, PredefinedOptions.DEFAULT, null, null)) {
+                            configuration, PredefinedOptions.DEFAULT, null, null, null, false)) {
 
                 DBOptions dbOptions = optionsContainer.getDbOptions();
                 assertEquals(-1, dbOptions.maxOpenFiles());
@@ -610,7 +623,12 @@ public class RocksDBStateBackendConfigTest {
         configuration.set(RocksDBConfigurableOptions.COMPACTION_STYLE, CompactionStyle.UNIVERSAL);
         try (final RocksDBResourceContainer optionsContainer =
                 new RocksDBResourceContainer(
-                        configuration, PredefinedOptions.SPINNING_DISK_OPTIMIZED, null, null)) {
+                        configuration,
+                        PredefinedOptions.SPINNING_DISK_OPTIMIZED,
+                        null,
+                        null,
+                        null,
+                        false)) {
 
             final ColumnFamilyOptions columnFamilyOptions = optionsContainer.getColumnOptions();
             assertNotNull(columnFamilyOptions);
@@ -622,7 +640,9 @@ public class RocksDBStateBackendConfigTest {
                         new Configuration(),
                         PredefinedOptions.SPINNING_DISK_OPTIMIZED,
                         null,
-                        null)) {
+                        null,
+                        null,
+                        false)) {
 
             final ColumnFamilyOptions columnFamilyOptions = optionsContainer.getColumnOptions();
             assertNotNull(columnFamilyOptions);

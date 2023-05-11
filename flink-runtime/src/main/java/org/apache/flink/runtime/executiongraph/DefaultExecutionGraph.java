@@ -43,7 +43,6 @@ import org.apache.flink.runtime.checkpoint.CheckpointStatsTracker;
 import org.apache.flink.runtime.checkpoint.CheckpointsCleaner;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpointStore;
 import org.apache.flink.runtime.checkpoint.DefaultCheckpointPlanCalculator;
-import org.apache.flink.runtime.checkpoint.ExecutionAttemptMappingProvider;
 import org.apache.flink.runtime.checkpoint.MasterTriggerRestoreHook;
 import org.apache.flink.runtime.checkpoint.OperatorCoordinatorCheckpointContext;
 import org.apache.flink.runtime.concurrent.ComponentMainThreadExecutor;
@@ -57,6 +56,7 @@ import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
 import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.jobgraph.IntermediateResultPartitionID;
 import org.apache.flink.runtime.jobgraph.JobVertex;
+import org.apache.flink.runtime.jobgraph.JobVertex.FinalizeOnMasterContext;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.tasks.CheckpointCoordinatorConfiguration;
 import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
@@ -77,6 +77,7 @@ import org.apache.flink.runtime.shuffle.ShuffleDescriptor;
 import org.apache.flink.runtime.shuffle.ShuffleMaster;
 import org.apache.flink.runtime.state.CheckpointStorage;
 import org.apache.flink.runtime.state.StateBackend;
+import org.apache.flink.runtime.state.StateBackendLoader;
 import org.apache.flink.runtime.taskmanager.DispatcherThreadFactory;
 import org.apache.flink.types.Either;
 import org.apache.flink.util.ExceptionUtils;
@@ -84,6 +85,7 @@ import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.IterableUtils;
 import org.apache.flink.util.OptionalFailure;
 import org.apache.flink.util.SerializedValue;
+import org.apache.flink.util.TernaryBoolean;
 import org.apache.flink.util.concurrent.FutureUtils;
 import org.apache.flink.util.concurrent.FutureUtils.ConjunctFuture;
 import org.apache.flink.util.concurrent.ScheduledExecutorServiceAdapter;
@@ -96,6 +98,7 @@ import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -270,6 +273,8 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
 
     @Nullable private String changelogStorageName;
 
+    @Nullable private TernaryBoolean stateChangelogEnabled;
+
     private String jsonPlan;
 
     /** Shuffle master to register partitions for task deployment. */
@@ -284,7 +289,16 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
     private final Map<IntermediateResultPartitionID, IntermediateResultPartition>
             resultPartitionsById;
 
+    private final VertexInputInfoStore vertexInputInfoStore;
     private final boolean isDynamic;
+
+    private final ExecutionJobVertex.Factory executionJobVertexFactory;
+
+    private final List<JobStatusHook> jobStatusHooks;
+
+    private final MarkPartitionFinishedStrategy markPartitionFinishedStrategy;
+
+    private final boolean nonFinishedHybridPartitionShouldBeUnknown;
 
     // --------------------------------------------------------------------------------------------
     //   Constructors
@@ -307,7 +321,11 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
             long initializationTimestamp,
             VertexAttemptNumberStore initialAttemptCounts,
             VertexParallelismStore vertexParallelismStore,
-            boolean isDynamic)
+            boolean isDynamic,
+            ExecutionJobVertex.Factory executionJobVertexFactory,
+            List<JobStatusHook> jobStatusHooks,
+            MarkPartitionFinishedStrategy markPartitionFinishedStrategy,
+            boolean nonFinishedHybridPartitionShouldBeUnknown)
             throws IOException {
 
         this.executionGraphId = new ExecutionGraphID();
@@ -372,13 +390,24 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
         this.edgeManager = new EdgeManager();
         this.executionVerticesById = new HashMap<>();
         this.resultPartitionsById = new HashMap<>();
+        this.vertexInputInfoStore = new VertexInputInfoStore();
 
         this.isDynamic = isDynamic;
+
+        this.executionJobVertexFactory = checkNotNull(executionJobVertexFactory);
+
+        this.jobStatusHooks = checkNotNull(jobStatusHooks);
+
+        this.markPartitionFinishedStrategy = markPartitionFinishedStrategy;
+
+        this.nonFinishedHybridPartitionShouldBeUnknown = nonFinishedHybridPartitionShouldBeUnknown;
 
         LOG.info(
                 "Created execution graph {} for job {}.",
                 executionGraphId,
                 jobInformation.getJobId());
+        // Trigger hook onCreated
+        notifyJobStatusHooks(state, null);
     }
 
     @Override
@@ -405,6 +434,11 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
     @Nonnull
     public ComponentMainThreadExecutor getJobMasterMainThreadExecutor() {
         return jobMasterMainThreadExecutor;
+    }
+
+    @Override
+    public TernaryBoolean isChangelogStateBackendEnabled() {
+        return stateChangelogEnabled;
     }
 
     @Override
@@ -486,7 +520,6 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
                         failureManager,
                         createCheckpointPlanCalculator(
                                 chkConfig.isEnableCheckpointsAfterTasksFinish()),
-                        new ExecutionAttemptMappingProvider(getAllExecutionVertices()),
                         checkpointStatsTracker);
 
         // register the master hooks on the checkpoint coordinator
@@ -504,7 +537,11 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
             registerJobStatusListener(checkpointCoordinator.createActivatorDeactivator());
         }
 
-        this.stateBackendName = checkpointStateBackend.getClass().getSimpleName();
+        this.stateBackendName = checkpointStateBackend.getName();
+        this.stateChangelogEnabled =
+                TernaryBoolean.fromBoolean(
+                        StateBackendLoader.isChangelogStateBackend(checkpointStateBackend));
+
         this.checkpointStorageName = checkpointStorage.getClass().getSimpleName();
         this.changelogStorageName = changelogStorageName;
     }
@@ -797,17 +834,7 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
     }
 
     @Override
-    public void attachJobGraph(List<JobVertex> topologicallySorted) throws JobException {
-        if (isDynamic) {
-            attachJobGraph(topologicallySorted, Collections.emptyList());
-        } else {
-            attachJobGraph(topologicallySorted, topologicallySorted);
-        }
-    }
-
-    private void attachJobGraph(
-            List<JobVertex> verticesToAttach, List<JobVertex> verticesToInitialize)
-            throws JobException {
+    public void attachJobGraph(List<JobVertex> verticesToAttach) throws JobException {
 
         assertRunningInJobMasterMainThread();
 
@@ -819,7 +846,9 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
                 intermediateResults.size());
 
         attachJobVertices(verticesToAttach);
-        initializeJobVertices(verticesToInitialize);
+        if (!isDynamic) {
+            initializeJobVertices(verticesToAttach);
+        }
 
         // the topology assigning should happen before notifying new vertices to failoverStrategy
         executionTopology = DefaultExecutionTopology.fromExecutionGraph(this);
@@ -840,7 +869,9 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
                     parallelismStore.getParallelismInfo(jobVertex.getID());
 
             // create the execution job vertex and attach it to the graph
-            ExecutionJobVertex ejv = new ExecutionJobVertex(this, jobVertex, parallelismInfo);
+            ExecutionJobVertex ejv =
+                    executionJobVertexFactory.createExecutionJobVertex(
+                            this, jobVertex, parallelismInfo);
 
             ExecutionJobVertex previousTask = this.tasks.putIfAbsent(jobVertex.getID(), ejv);
             if (previousTask != null) {
@@ -865,10 +896,18 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
     }
 
     @Override
-    public void initializeJobVertex(ExecutionJobVertex ejv, long createTimestamp)
+    public void initializeJobVertex(
+            ExecutionJobVertex ejv,
+            long createTimestamp,
+            Map<IntermediateDataSetID, JobVertexInputInfo> jobVertexInputInfos)
             throws JobException {
 
         checkNotNull(ejv);
+        checkNotNull(jobVertexInputInfos);
+
+        jobVertexInputInfos.forEach(
+                (resultId, info) ->
+                        this.vertexInputInfoStore.put(ejv.getJobVertexId(), resultId, info));
 
         ejv.initialize(
                 executionHistorySizeLimit,
@@ -1131,6 +1170,7 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
 
             stateTimestamps[newState.ordinal()] = System.currentTimeMillis();
             notifyJobStatusChange(newState);
+            notifyJobStatusHooks(newState, error);
             return true;
         } else {
             return false;
@@ -1161,29 +1201,76 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
         assertRunningInJobMasterMainThread();
         final int numFinished = ++numFinishedJobVertices;
         if (numFinished == numJobVerticesTotal) {
-            // done :-)
+            FutureUtils.assertNoException(
+                    waitForAllExecutionsTermination().thenAccept(ignored -> jobFinished()));
+        }
+    }
 
-            // check whether we are still in "RUNNING" and trigger the final cleanup
-            if (state == JobStatus.RUNNING) {
-                // we do the final cleanup in the I/O executor, because it may involve
-                // some heavier work
+    private CompletableFuture<?> waitForAllExecutionsTermination() {
+        final List<CompletableFuture<?>> terminationFutures =
+                verticesInCreationOrder.stream()
+                        .flatMap(ejv -> Arrays.stream(ejv.getTaskVertices()))
+                        .map(ExecutionVertex::getTerminationFuture)
+                        .collect(Collectors.toList());
 
-                try {
-                    for (ExecutionJobVertex ejv : verticesInCreationOrder) {
-                        ejv.getJobVertex().finalizeOnMaster(getUserClassLoader());
-                    }
-                } catch (Throwable t) {
-                    ExceptionUtils.rethrowIfFatalError(t);
-                    ClusterEntryPointExceptionUtils.tryEnrichClusterEntryPointError(t);
-                    failGlobal(new Exception("Failed to finalize execution on master", t));
-                    return;
+        return FutureUtils.waitForAll(terminationFutures);
+    }
+
+    private void jobFinished() {
+        assertRunningInJobMasterMainThread();
+
+        // check whether we are still in "RUNNING" and trigger the final cleanup
+        if (state == JobStatus.RUNNING) {
+            // we do the final cleanup in the I/O executor, because it may involve
+            // some heavier work
+
+            try {
+                for (ExecutionJobVertex ejv : verticesInCreationOrder) {
+                    final Map<Integer, Integer> subtaskToFinishedAttempt =
+                            Arrays.stream(ejv.getTaskVertices())
+                                    .map(ExecutionVertex::getCurrentExecutionAttempt)
+                                    .collect(
+                                            Collectors.toMap(
+                                                    Execution::getParallelSubtaskIndex,
+                                                    Execution::getAttemptNumber));
+                    ejv.getJobVertex()
+                            .finalizeOnMaster(
+                                    new FinalizeOnMasterContext() {
+                                        @Override
+                                        public ClassLoader getClassLoader() {
+                                            return getUserClassLoader();
+                                        }
+
+                                        @Override
+                                        public int getExecutionParallelism() {
+                                            return ejv.getParallelism();
+                                        }
+
+                                        @Override
+                                        public int getFinishedAttempt(int subtaskIndex) {
+                                            final Integer attemptNumber =
+                                                    subtaskToFinishedAttempt.get(subtaskIndex);
+                                            if (attemptNumber == null) {
+                                                throw new IllegalArgumentException(
+                                                        "Invalid subtaskIndex "
+                                                                + subtaskIndex
+                                                                + " provided");
+                                            }
+                                            return attemptNumber;
+                                        }
+                                    });
                 }
+            } catch (Throwable t) {
+                ExceptionUtils.rethrowIfFatalError(t);
+                ClusterEntryPointExceptionUtils.tryEnrichClusterEntryPointError(t);
+                failGlobal(new Exception("Failed to finalize execution on master", t));
+                return;
+            }
 
-                // if we do not make this state transition, then a concurrent
-                // cancellation or failure happened
-                if (transitionState(JobStatus.RUNNING, JobStatus.FINISHED)) {
-                    onTerminalState(JobStatus.FINISHED);
-                }
+            // if we do not make this state transition, then a concurrent
+            // cancellation or failure happened
+            if (transitionState(JobStatus.RUNNING, JobStatus.FINISHED)) {
+                onTerminalState(JobStatus.FINISHED);
             }
         }
     }
@@ -1368,6 +1455,7 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
             final List<ConsumedPartitionGroup> releasablePartitionGroups) {
 
         if (releasablePartitionGroups.size() > 0) {
+            final List<ResultPartitionID> releasablePartitionIds = new ArrayList<>();
 
             // Remove the cache of ShuffleDescriptors when ConsumedPartitionGroups are released
             for (ConsumedPartitionGroup releasablePartitionGroup : releasablePartitionGroups) {
@@ -1375,14 +1463,16 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
                         checkNotNull(
                                 intermediateResults.get(
                                         releasablePartitionGroup.getIntermediateDataSetID()));
+                for (IntermediateResultPartitionID partitionId : releasablePartitionGroup) {
+                    IntermediateResultPartition partition =
+                            totalResult.getPartitionById(partitionId);
+                    partition.markPartitionGroupReleasable(releasablePartitionGroup);
+                    if (partition.canBeReleased()) {
+                        releasablePartitionIds.add(createResultPartitionId(partitionId));
+                    }
+                }
                 totalResult.clearCachedInformationForPartitionGroup(releasablePartitionGroup);
             }
-
-            final List<ResultPartitionID> releasablePartitionIds =
-                    releasablePartitionGroups.stream()
-                            .flatMap(IterableUtils::toStream)
-                            .map(this::createResultPartitionId)
-                            .collect(Collectors.toList());
 
             partitionTracker.stopTrackingAndReleasePartitions(releasablePartitionIds);
         }
@@ -1521,6 +1611,31 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
         }
     }
 
+    private void notifyJobStatusHooks(JobStatus newState, @Nullable Throwable cause) {
+        JobID jobID = jobInformation.getJobId();
+        for (JobStatusHook hook : jobStatusHooks) {
+            try {
+                switch (newState) {
+                    case CREATED:
+                        hook.onCreated(jobID);
+                        break;
+                    case CANCELED:
+                        hook.onCanceled(jobID);
+                        break;
+                    case FAILED:
+                        hook.onFailed(jobID, cause);
+                        break;
+                    case FINISHED:
+                        hook.onFinished(jobID);
+                        break;
+                }
+            } catch (Throwable e) {
+                throw new RuntimeException(
+                        "Error while notifying JobStatusHook[" + hook.getClass() + "]", e);
+            }
+        }
+    }
+
     @Override
     public void notifyExecutionChange(
             final Execution execution,
@@ -1608,5 +1723,21 @@ public class DefaultExecutionGraph implements ExecutionGraph, InternalExecutionG
     public List<ShuffleDescriptor> getClusterPartitionShuffleDescriptors(
             IntermediateDataSetID intermediateDataSetID) {
         return partitionTracker.getClusterPartitionShuffleDescriptors(intermediateDataSetID);
+    }
+
+    @Override
+    public MarkPartitionFinishedStrategy getMarkPartitionFinishedStrategy() {
+        return markPartitionFinishedStrategy;
+    }
+
+    @Override
+    public boolean isNonFinishedHybridPartitionShouldBeUnknown() {
+        return nonFinishedHybridPartitionShouldBeUnknown;
+    }
+
+    @Override
+    public JobVertexInputInfo getJobVertexInputInfo(
+            JobVertexID jobVertexId, IntermediateDataSetID resultId) {
+        return vertexInputInfoStore.get(jobVertexId, resultId);
     }
 }

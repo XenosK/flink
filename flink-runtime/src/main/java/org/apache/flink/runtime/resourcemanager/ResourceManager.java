@@ -24,6 +24,9 @@ import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.runtime.blob.TransientBlobKey;
+import org.apache.flink.runtime.blocklist.BlockedNode;
+import org.apache.flink.runtime.blocklist.BlocklistContext;
+import org.apache.flink.runtime.blocklist.BlocklistHandler;
 import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
@@ -52,8 +55,10 @@ import org.apache.flink.runtime.registration.RegistrationResponse;
 import org.apache.flink.runtime.resourcemanager.exceptions.ResourceManagerException;
 import org.apache.flink.runtime.resourcemanager.exceptions.UnknownTaskExecutorException;
 import org.apache.flink.runtime.resourcemanager.registration.JobManagerRegistration;
+import org.apache.flink.runtime.resourcemanager.registration.TaskExecutorConnection;
 import org.apache.flink.runtime.resourcemanager.registration.WorkerRegistration;
-import org.apache.flink.runtime.resourcemanager.slotmanager.ResourceActions;
+import org.apache.flink.runtime.resourcemanager.slotmanager.ResourceAllocator;
+import org.apache.flink.runtime.resourcemanager.slotmanager.ResourceEventListener;
 import org.apache.flink.runtime.resourcemanager.slotmanager.SlotManager;
 import org.apache.flink.runtime.rest.messages.LogInfo;
 import org.apache.flink.runtime.rest.messages.ThreadDumpInfo;
@@ -77,6 +82,7 @@ import org.apache.flink.runtime.taskexecutor.TaskExecutorThreadInfoGateway;
 import org.apache.flink.runtime.taskexecutor.partition.ClusterPartitionReport;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkException;
+import org.apache.flink.util.FlinkExpectedException;
 import org.apache.flink.util.concurrent.FutureUtils;
 
 import javax.annotation.Nullable;
@@ -93,9 +99,11 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
+import static org.apache.flink.util.Preconditions.checkState;
 
 /**
  * ResourceManager implementation. The resource manager is responsible for resource de-/allocation
@@ -109,7 +117,8 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  * </ul>
  */
 public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
-        extends FencedRpcEndpoint<ResourceManagerId> implements ResourceManagerGateway {
+        extends FencedRpcEndpoint<ResourceManagerId>
+        implements DelegationTokenManager.Listener, ResourceManagerGateway {
 
     public static final String RESOURCE_MANAGER_NAME = "resourcemanager";
 
@@ -157,6 +166,12 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
 
     private final DelegationTokenManager delegationTokenManager;
 
+    protected final BlocklistHandler blocklistHandler;
+
+    private final AtomicReference<byte[]> latestTokens = new AtomicReference<>();
+
+    private final ResourceAllocator resourceAllocator;
+
     public ResourceManager(
             RpcService rpcService,
             UUID leaderSessionId,
@@ -165,6 +180,7 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
             DelegationTokenManager delegationTokenManager,
             SlotManager slotManager,
             ResourceManagerPartitionTrackerFactory clusterPartitionTrackerFactory,
+            BlocklistHandler.Factory blocklistHandlerFactory,
             JobLeaderIdService jobLeaderIdService,
             ClusterInformation clusterInformation,
             FatalErrorHandler fatalErrorHandler,
@@ -189,6 +205,12 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
         this.jmResourceIdRegistrations = new HashMap<>(4);
         this.taskExecutors = new HashMap<>(8);
         this.taskExecutorGatewayFutures = new HashMap<>(8);
+        this.blocklistHandler =
+                blocklistHandlerFactory.create(
+                        new ResourceManagerBlocklistContext(),
+                        this::getNodeIdOfTaskManager,
+                        getMainThreadExecutor(),
+                        log);
 
         this.jobManagerHeartbeatManager = NoOpHeartbeatManager.getInstance();
         this.taskManagerHeartbeatManager = NoOpHeartbeatManager.getInstance();
@@ -215,6 +237,8 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
         this.startedFuture = new CompletableFuture<>();
 
         this.delegationTokenManager = delegationTokenManager;
+
+        this.resourceAllocator = getResourceAllocator();
     }
 
     // ------------------------------------------------------------------------
@@ -246,9 +270,13 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
             startHeartbeatServices();
 
             slotManager.start(
-                    getFencingToken(), getMainThreadExecutor(), new ResourceActionsImpl());
+                    getFencingToken(),
+                    getMainThreadExecutor(),
+                    resourceAllocator,
+                    new ResourceEventListenerImpl(),
+                    blocklistHandler::isBlockedTaskManager);
 
-            delegationTokenManager.start();
+            delegationTokenManager.start(this);
 
             initialize();
         } catch (Exception e) {
@@ -476,12 +504,26 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
                 taskExecutors.get(taskManagerResourceId);
 
         if (workerTypeWorkerRegistration.getInstanceID().equals(taskManagerRegistrationId)) {
-            if (slotManager.registerTaskManager(
-                    workerTypeWorkerRegistration,
-                    slotReport,
-                    workerTypeWorkerRegistration.getTotalResourceProfile(),
-                    workerTypeWorkerRegistration.getDefaultSlotResourceProfile())) {
-                onWorkerRegistered(workerTypeWorkerRegistration.getWorker());
+            SlotManager.RegistrationResult registrationResult =
+                    slotManager.registerTaskManager(
+                            workerTypeWorkerRegistration,
+                            slotReport,
+                            workerTypeWorkerRegistration.getTotalResourceProfile(),
+                            workerTypeWorkerRegistration.getDefaultSlotResourceProfile());
+            if (registrationResult == SlotManager.RegistrationResult.SUCCESS) {
+                WorkerResourceSpec workerResourceSpec =
+                        WorkerResourceSpec.fromTotalResourceProfile(
+                                workerTypeWorkerRegistration.getTotalResourceProfile(),
+                                slotReport.getNumSlotStatus());
+                onWorkerRegistered(workerTypeWorkerRegistration.getWorker(), workerResourceSpec);
+            } else if (registrationResult == SlotManager.RegistrationResult.REJECTED) {
+                closeTaskManagerConnection(
+                                taskManagerResourceId,
+                                new FlinkExpectedException(
+                                        "Task manager could not be registered to SlotManager."))
+                        .ifPresent(ResourceManager.this::stopWorkerIfSupported);
+            } else {
+                log.debug("TaskManager {} is ignored by SlotManager.", taskManagerResourceId);
             }
             return CompletableFuture.completedFuture(Acknowledge.get());
         } else {
@@ -493,7 +535,7 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
         }
     }
 
-    protected void onWorkerRegistered(WorkerType worker) {
+    protected void onWorkerRegistered(WorkerType worker, WorkerResourceSpec workerResourceSpec) {
         // noop
     }
 
@@ -510,7 +552,8 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
 
     @Override
     public void disconnectTaskManager(final ResourceID resourceId, final Exception cause) {
-        closeTaskManagerConnection(resourceId, cause).ifPresent(ResourceManager.this::stopWorker);
+        closeTaskManagerConnection(resourceId, cause)
+                .ifPresent(ResourceManager.this::stopWorkerIfSupported);
     }
 
     @Override
@@ -531,9 +574,13 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
 
         if (null != jobManagerRegistration) {
             if (Objects.equals(jobMasterId, jobManagerRegistration.getJobMasterId())) {
-                slotManager.processResourceRequirements(resourceRequirements);
-
-                return CompletableFuture.completedFuture(Acknowledge.get());
+                return getReadyToServeFuture()
+                        .thenApply(
+                                acknowledge -> {
+                                    validateRunsInMainThread();
+                                    slotManager.processResourceRequirements(resourceRequirements);
+                                    return null;
+                                });
             } else {
                 return FutureUtils.completedExceptionally(
                         new ResourceManagerException(
@@ -626,7 +673,8 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
                             slotManager.getRegisteredResourceOf(taskExecutor.getInstanceID()),
                             slotManager.getFreeResourceOf(taskExecutor.getInstanceID()),
                             taskExecutor.getHardwareDescription(),
-                            taskExecutor.getMemoryConfiguration()));
+                            taskExecutor.getMemoryConfiguration(),
+                            blocklistHandler.isBlockedTaskManager(taskExecutor.getResourceID())));
         }
 
         return CompletableFuture.completedFuture(taskManagerInfos);
@@ -655,7 +703,9 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
                                     slotManager.getRegisteredResourceOf(instanceId),
                                     slotManager.getFreeResourceOf(instanceId),
                                     taskExecutor.getHardwareDescription(),
-                                    taskExecutor.getMemoryConfiguration()),
+                                    taskExecutor.getMemoryConfiguration(),
+                                    blocklistHandler.isBlockedTaskManager(
+                                            taskExecutor.getResourceID())),
                             slotManager.getAllocatedSlotsOf(instanceId));
 
             return CompletableFuture.completedFuture(taskManagerInfoWithSlots);
@@ -665,15 +715,34 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
     @Override
     public CompletableFuture<ResourceOverview> requestResourceOverview(Time timeout) {
         final int numberSlots = slotManager.getNumberRegisteredSlots();
-        final int numberFreeSlots = slotManager.getNumberFreeSlots();
         final ResourceProfile totalResource = slotManager.getRegisteredResource();
-        final ResourceProfile freeResource = slotManager.getFreeResource();
 
+        int numberFreeSlots = slotManager.getNumberFreeSlots();
+        ResourceProfile freeResource = slotManager.getFreeResource();
+
+        int blockedTaskManagers = 0;
+        int totalBlockedFreeSlots = 0;
+        if (!blocklistHandler.getAllBlockedNodeIds().isEmpty()) {
+            for (WorkerRegistration<WorkerType> registration : taskExecutors.values()) {
+                if (blocklistHandler.isBlockedTaskManager(registration.getResourceID())) {
+                    blockedTaskManagers++;
+                    int blockedFreeSlots =
+                            slotManager.getNumberFreeSlotsOf(registration.getInstanceID());
+                    totalBlockedFreeSlots += blockedFreeSlots;
+                    numberFreeSlots -= blockedFreeSlots;
+                    freeResource =
+                            freeResource.subtract(
+                                    slotManager.getFreeResourceOf(registration.getInstanceID()));
+                }
+            }
+        }
         return CompletableFuture.completedFuture(
                 new ResourceOverview(
                         taskExecutors.size(),
                         numberSlots,
                         numberFreeSlots,
+                        blockedTaskManagers,
+                        totalBlockedFreeSlots,
                         totalResource,
                         freeResource));
     }
@@ -833,9 +902,21 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
         }
     }
 
+    @Override
+    public CompletableFuture<Acknowledge> notifyNewBlockedNodes(Collection<BlockedNode> newNodes) {
+        blocklistHandler.addNewBlockedNodes(newNodes);
+        return CompletableFuture.completedFuture(Acknowledge.get());
+    }
+
     // ------------------------------------------------------------------------
     //  Internal methods
     // ------------------------------------------------------------------------
+
+    @VisibleForTesting
+    String getNodeIdOfTaskManager(ResourceID taskManagerId) {
+        checkState(taskExecutors.containsKey(taskManagerId));
+        return taskExecutors.get(taskManagerId).getNodeId();
+    }
 
     /**
      * Registers a new JobMaster.
@@ -873,6 +954,7 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
                         new JobManagerRegistration(jobId, jobManagerResourceId, jobMasterGateway);
                 jobManagerRegistrations.put(jobId, jobManagerRegistration);
                 jmResourceIdRegistrations.put(jobManagerResourceId, jobManagerRegistration);
+                blocklistHandler.registerBlocklistListener(jobMasterGateway);
             }
         } else {
             // new registration for the job
@@ -880,6 +962,7 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
                     new JobManagerRegistration(jobId, jobManagerResourceId, jobMasterGateway);
             jobManagerRegistrations.put(jobId, jobManagerRegistration);
             jmResourceIdRegistrations.put(jobManagerResourceId, jobManagerRegistration);
+            blocklistHandler.registerBlocklistListener(jobMasterGateway);
         }
 
         log.info(
@@ -921,10 +1004,11 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
                                     taskExecutorResourceId.getStringWithMetadata())));
         }
 
-        final WorkerType newWorker = workerStarted(taskExecutorResourceId);
+        final Optional<WorkerType> newWorkerOptional =
+                getWorkerNodeIfAcceptRegistration(taskExecutorResourceId);
 
         String taskExecutorAddress = taskExecutorRegistration.getTaskExecutorAddress();
-        if (newWorker == null) {
+        if (!newWorkerOptional.isPresent()) {
             log.warn(
                     "Discard registration from TaskExecutor {} at ({}) because the framework did "
                             + "not recognize it",
@@ -933,6 +1017,7 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
             return new TaskExecutorRegistrationRejection(
                     "The ResourceManager does not recognize this TaskExecutor.");
         } else {
+            WorkerType newWorker = newWorkerOptional.get();
             WorkerRegistration<WorkerType> registration =
                     new WorkerRegistration<>(
                             taskExecutorGateway,
@@ -955,7 +1040,10 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
                     taskExecutorResourceId, new TaskExecutorHeartbeatSender(taskExecutorGateway));
 
             return new TaskExecutorRegistrationSuccess(
-                    registration.getInstanceID(), resourceId, clusterInformation);
+                    registration.getInstanceID(),
+                    resourceId,
+                    clusterInformation,
+                    latestTokens.get());
         }
     }
 
@@ -1006,6 +1094,7 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
             jobManagerHeartbeatManager.unmonitorTarget(jobManagerResourceId);
 
             jmResourceIdRegistrations.remove(jobManagerResourceId);
+            blocklistHandler.deregisterBlocklistListener(jobMasterGateway);
 
             if (resourceRequirementHandling == ResourceRequirementHandling.CLEAR) {
                 slotManager.clearResourceRequirements(jobId);
@@ -1092,9 +1181,14 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
         }
     }
 
-    protected void releaseResource(InstanceID instanceId, Exception cause) {
-        WorkerType worker = null;
+    @VisibleForTesting
+    public Optional<InstanceID> getInstanceIdByResourceId(ResourceID resourceID) {
+        return Optional.ofNullable(taskExecutors.get(resourceID))
+                .map(TaskExecutorConnection::getInstanceID);
+    }
 
+    protected WorkerType getWorkerByInstanceId(InstanceID instanceId) {
+        WorkerType worker = null;
         // TODO: Improve performance by having an index on the instanceId
         for (Map.Entry<ResourceID, WorkerRegistration<WorkerType>> entry :
                 taskExecutors.entrySet()) {
@@ -1104,18 +1198,7 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
             }
         }
 
-        if (worker != null) {
-            if (stopWorker(worker)) {
-                closeTaskManagerConnection(worker.getResourceID(), cause);
-            } else {
-                log.debug(
-                        "Worker {} could not be stopped.",
-                        worker.getResourceID().getStringWithMetadata());
-            }
-        } else {
-            // unregister in order to clean up potential left over state
-            slotManager.unregisterTaskManager(instanceId, cause);
-        }
+        return worker;
     }
 
     private enum ResourceRequirementHandling {
@@ -1198,29 +1281,33 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
             throws ResourceManagerException;
 
     /**
-     * Allocates a resource using the worker resource specification.
-     *
-     * @param workerResourceSpec workerResourceSpec specifies the size of the to be allocated
-     *     resource
-     * @return whether the resource can be allocated
-     */
-    @VisibleForTesting
-    public abstract boolean startNewWorker(WorkerResourceSpec workerResourceSpec);
-
-    /**
-     * Callback when a worker was started.
+     * Get worker node if the worker resource is accepted.
      *
      * @param resourceID The worker resource id
      */
-    protected abstract WorkerType workerStarted(ResourceID resourceID);
+    protected abstract Optional<WorkerType> getWorkerNodeIfAcceptRegistration(
+            ResourceID resourceID);
 
     /**
-     * Stops the given worker.
+     * Stops the given worker if supported.
      *
      * @param worker The worker.
-     * @return True if the worker was stopped, otherwise false
      */
-    public abstract boolean stopWorker(WorkerType worker);
+    public void stopWorkerIfSupported(WorkerType worker) {
+        if (resourceAllocator.isSupported()) {
+            resourceAllocator.cleaningUpDisconnectedResource(worker.getResourceID());
+        }
+    }
+
+    /**
+     * Get the ready to serve future of the resource manager.
+     *
+     * @return The ready to serve future of the resource manager, which indicated whether it is
+     *     ready to serve.
+     */
+    protected abstract CompletableFuture<Void> getReadyToServeFuture();
+
+    protected abstract ResourceAllocator getResourceAllocator();
 
     /**
      * Set {@link SlotManager} whether to fail unfulfillable slot requests.
@@ -1261,36 +1348,9 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
         }
     }
 
-    private class ResourceActionsImpl implements ResourceActions {
-
+    private class ResourceEventListenerImpl implements ResourceEventListener {
         @Override
-        public void releaseResource(InstanceID instanceId, Exception cause) {
-            validateRunsInMainThread();
-
-            ResourceManager.this.releaseResource(instanceId, cause);
-        }
-
-        @Override
-        public boolean allocateResource(WorkerResourceSpec workerResourceSpec) {
-            validateRunsInMainThread();
-            return startNewWorker(workerResourceSpec);
-        }
-
-        @Override
-        public void notifyAllocationFailure(
-                JobID jobId, AllocationID allocationId, Exception cause) {
-            validateRunsInMainThread();
-
-            JobManagerRegistration jobManagerRegistration = jobManagerRegistrations.get(jobId);
-            if (jobManagerRegistration != null) {
-                jobManagerRegistration
-                        .getJobManagerGateway()
-                        .notifyAllocationFailure(allocationId, cause);
-            }
-        }
-
-        @Override
-        public void notifyNotEnoughResourcesAvailable(
+        public void notEnoughResourceAvailable(
                 JobID jobId, Collection<ResourceRequirement> acquiredResources) {
             validateRunsInMainThread();
 
@@ -1355,7 +1415,7 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
         private void handleTaskManagerConnectionLoss(ResourceID resourceID, Exception cause) {
             validateRunsInMainThread();
             closeTaskManagerConnection(resourceID, cause)
-                    .ifPresent(ResourceManager.this::stopWorker);
+                    .ifPresent(ResourceManager.this::stopWorkerIfSupported);
         }
 
         @Override
@@ -1444,11 +1504,42 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
         }
     }
 
+    private class ResourceManagerBlocklistContext implements BlocklistContext {
+        @Override
+        public void blockResources(Collection<BlockedNode> blockedNodes) {}
+
+        @Override
+        public void unblockResources(Collection<BlockedNode> unBlockedNodes) {
+            // when a node is unblocked, we should trigger the resource requirements because the
+            // slots on this node become available again.
+            slotManager.triggerResourceRequirementsCheck();
+        }
+    }
+
     // ------------------------------------------------------------------------
     //  Resource Management
     // ------------------------------------------------------------------------
 
-    protected Map<WorkerResourceSpec, Integer> getRequiredResources() {
-        return slotManager.getRequiredResources();
+    @Override
+    public void onNewTokensObtained(byte[] tokens) throws Exception {
+        latestTokens.set(tokens);
+
+        log.info("Updating delegation tokens for {} task manager(s).", taskExecutors.size());
+
+        if (!taskExecutors.isEmpty()) {
+            final List<CompletableFuture<Acknowledge>> futures =
+                    new ArrayList<>(taskExecutors.size());
+
+            for (Map.Entry<ResourceID, WorkerRegistration<WorkerType>> workerRegistrationEntry :
+                    taskExecutors.entrySet()) {
+                WorkerRegistration<WorkerType> registration = workerRegistrationEntry.getValue();
+                log.info("Updating delegation tokens for node {}.", registration.getNodeId());
+                final TaskExecutorGateway taskExecutorGateway =
+                        registration.getTaskExecutorGateway();
+                futures.add(taskExecutorGateway.updateDelegationTokens(getFencingToken(), tokens));
+            }
+
+            FutureUtils.combineAll(futures).get();
+        }
     }
 }

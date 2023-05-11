@@ -20,7 +20,10 @@ package org.apache.flink.runtime.leaderelection;
 
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.runtime.rpc.FatalErrorHandler;
+import org.apache.flink.util.ExecutorUtils;
 import org.apache.flink.util.Preconditions;
+import org.apache.flink.util.concurrent.ExecutorThreadFactory;
+import org.apache.flink.util.concurrent.FutureUtils;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,6 +33,10 @@ import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -48,9 +55,13 @@ public class DefaultLeaderElectionService
     private final LeaderElectionDriverFactory leaderElectionDriverFactory;
 
     /** The leader contender which applies for leadership. */
+    @GuardedBy("lock")
+    // @Nullable is commented-out to avoid having multiple warnings spread over this class
+    // this.running=true ensures that leaderContender != null
     private volatile LeaderContender leaderContender;
 
     @GuardedBy("lock")
+    @Nullable
     private volatile UUID issuedLeaderSessionID;
 
     @GuardedBy("lock")
@@ -59,9 +70,24 @@ public class DefaultLeaderElectionService
     @GuardedBy("lock")
     private volatile boolean running;
 
+    // @Nullable is commented-out to avoid having multiple warnings spread over this class
+    // this.running=true ensures that leaderContender != null
     private LeaderElectionDriver leaderElectionDriver;
 
+    private final ExecutorService leadershipOperationExecutor;
+
     public DefaultLeaderElectionService(LeaderElectionDriverFactory leaderElectionDriverFactory) {
+        this(
+                leaderElectionDriverFactory,
+                Executors.newSingleThreadExecutor(
+                        new ExecutorThreadFactory(
+                                "DefaultLeaderElectionService-leadershipOperationExecutor")));
+    }
+
+    @VisibleForTesting
+    DefaultLeaderElectionService(
+            LeaderElectionDriverFactory leaderElectionDriverFactory,
+            ExecutorService leadershipOperationExecutor) {
         this.leaderElectionDriverFactory = checkNotNull(leaderElectionDriverFactory);
 
         this.leaderContender = null;
@@ -73,6 +99,8 @@ public class DefaultLeaderElectionService
         this.confirmedLeaderInformation = LeaderInformation.empty();
 
         this.running = false;
+
+        this.leadershipOperationExecutor = leadershipOperationExecutor;
     }
 
     @Override
@@ -85,9 +113,7 @@ public class DefaultLeaderElectionService
             leaderContender = contender;
             leaderElectionDriver =
                     leaderElectionDriverFactory.createLeaderElectionDriver(
-                            this,
-                            new LeaderElectionFatalErrorHandler(),
-                            leaderContender.getDescription());
+                            this, new LeaderElectionFatalErrorHandler());
             LOG.info("Starting DefaultLeaderElectionService with {}.", leaderElectionDriver);
         }
     }
@@ -98,21 +124,31 @@ public class DefaultLeaderElectionService
 
         synchronized (lock) {
             if (!running) {
+                LOG.debug(
+                        "The stop procedure was called on an already stopped DefaultLeaderElectionService instance. No action necessary.");
                 return;
             }
             running = false;
-            clearConfirmedLeaderInformation();
+
+            if (leaderElectionDriver.hasLeadership()) {
+                handleLeadershipLoss();
+                leaderElectionDriver.writeLeaderInformation(LeaderInformation.empty());
+            } else {
+                LOG.debug(
+                        "DefaultLeaderElectionService is stopping while not having the leadership acquired. No cleanup necessary.");
+            }
         }
 
         leaderElectionDriver.close();
+
+        // graceful shutdown needs to happen outside the lock to enable any outstanding
+        // grant/revoke events to be processed without the lock being acquired by the service
+        ExecutorUtils.gracefulShutdown(10L, TimeUnit.SECONDS, leadershipOperationExecutor);
     }
 
     @Override
     public void confirmLeadership(UUID leaderSessionID, String leaderAddress) {
-        if (LOG.isDebugEnabled()) {
-            LOG.debug(
-                    "Confirm leader session ID {} for leader {}.", leaderSessionID, leaderAddress);
-        }
+        LOG.debug("Confirm leader session ID {} for leader {}.", leaderSessionID, leaderAddress);
 
         checkNotNull(leaderSessionID);
 
@@ -121,23 +157,17 @@ public class DefaultLeaderElectionService
                 if (running) {
                     confirmLeaderInformation(leaderSessionID, leaderAddress);
                 } else {
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug(
-                                "Ignoring the leader session Id {} confirmation, since the "
-                                        + "LeaderElectionService has already been stopped.",
-                                leaderSessionID);
-                    }
+                    LOG.debug(
+                            "Ignoring the leader session Id {} confirmation, since the LeaderElectionService has already been stopped.",
+                            leaderSessionID);
                 }
             } else {
                 // Received an old confirmation call
                 if (!leaderSessionID.equals(this.issuedLeaderSessionID)) {
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug(
-                                "Receive an old confirmation call of leader session ID {}, "
-                                        + "current issued session ID is {}",
-                                leaderSessionID,
-                                issuedLeaderSessionID);
-                    }
+                    LOG.debug(
+                            "Receive an old confirmation call of leader session ID {}, current issued session ID is {}",
+                            leaderSessionID,
+                            issuedLeaderSessionID);
                 } else {
                     LOG.warn(
                             "The leader session ID {} was confirmed even though the "
@@ -155,10 +185,7 @@ public class DefaultLeaderElectionService
                 return leaderElectionDriver.hasLeadership()
                         && leaderSessionId.equals(issuedLeaderSessionID);
             } else {
-                if (LOG.isDebugEnabled()) {
-                    LOG.debug(
-                            "hasLeadership is called after the service is stopped, returning false.");
-                }
+                LOG.debug("hasLeadership is called after the service is stopped, returning false.");
                 return false;
             }
         }
@@ -181,111 +208,112 @@ public class DefaultLeaderElectionService
         leaderElectionDriver.writeLeaderInformation(confirmedLeaderInformation);
     }
 
-    @GuardedBy("lock")
-    private void clearConfirmedLeaderInformation() {
-        confirmedLeaderInformation = LeaderInformation.empty();
+    @Override
+    public void onGrantLeadership(UUID newLeaderSessionId) {
+        runInLeaderEventThread(() -> onGrantLeadershipInternal(newLeaderSessionId));
     }
 
-    @Override
-    @GuardedBy("lock")
-    public void onGrantLeadership(UUID newLeaderSessionId) {
+    private void onGrantLeadershipInternal(UUID newLeaderSessionId) {
         synchronized (lock) {
             if (running) {
                 issuedLeaderSessionID = newLeaderSessionId;
-                clearConfirmedLeaderInformation();
+                confirmedLeaderInformation = LeaderInformation.empty();
 
-                if (LOG.isDebugEnabled()) {
-                    LOG.debug(
-                            "Grant leadership to contender {} with session ID {}.",
-                            leaderContender.getDescription(),
-                            issuedLeaderSessionID);
-                }
+                LOG.debug(
+                        "Grant leadership to contender {} with session ID {}.",
+                        leaderContender.getDescription(),
+                        issuedLeaderSessionID);
 
                 leaderContender.grantLeadership(issuedLeaderSessionID);
             } else {
-                if (LOG.isDebugEnabled()) {
-                    LOG.debug(
-                            "Ignoring the grant leadership notification since the {} has "
-                                    + "already been closed.",
-                            leaderElectionDriver);
-                }
+                LOG.debug(
+                        "Ignoring the grant leadership notification since the {} has already been closed.",
+                        leaderElectionDriver);
             }
         }
     }
 
     @Override
-    @GuardedBy("lock")
     public void onRevokeLeadership() {
+        runInLeaderEventThread(this::onRevokeLeadershipInternal);
+    }
+
+    private void onRevokeLeadershipInternal() {
         synchronized (lock) {
             if (running) {
-                if (LOG.isDebugEnabled()) {
-                    LOG.debug(
-                            "Revoke leadership of {} ({}@{}).",
-                            leaderContender.getDescription(),
-                            confirmedLeaderInformation.getLeaderSessionID(),
-                            confirmedLeaderInformation.getLeaderAddress());
-                }
-
-                issuedLeaderSessionID = null;
-                clearConfirmedLeaderInformation();
-
-                leaderContender.revokeLeadership();
-
-                if (LOG.isDebugEnabled()) {
-                    LOG.debug("Clearing the leader information on {}.", leaderElectionDriver);
-                }
-                // Clear the old leader information on the external storage
-                leaderElectionDriver.writeLeaderInformation(LeaderInformation.empty());
+                handleLeadershipLoss();
             } else {
-                if (LOG.isDebugEnabled()) {
-                    LOG.debug(
-                            "Ignoring the revoke leadership notification since the {} "
-                                    + "has already been closed.",
-                            leaderElectionDriver);
-                }
+                LOG.debug(
+                        "Ignoring the revoke leadership notification since the {} "
+                                + "has already been closed.",
+                        leaderElectionDriver);
             }
         }
     }
 
-    @Override
     @GuardedBy("lock")
+    private void handleLeadershipLoss() {
+        LOG.debug(
+                "Revoke leadership of {} ({}@{}).",
+                leaderContender.getDescription(),
+                confirmedLeaderInformation.getLeaderSessionID(),
+                confirmedLeaderInformation.getLeaderAddress());
+
+        issuedLeaderSessionID = null;
+        confirmedLeaderInformation = LeaderInformation.empty();
+
+        leaderContender.revokeLeadership();
+    }
+
+    @Override
     public void onLeaderInformationChange(LeaderInformation leaderInformation) {
+        runInLeaderEventThread(() -> onLeaderInformationChangeInternal(leaderInformation));
+    }
+
+    private void onLeaderInformationChangeInternal(LeaderInformation leaderInformation) {
         synchronized (lock) {
             if (running) {
-                if (LOG.isTraceEnabled()) {
-                    LOG.trace(
-                            "Leader node changed while {} is the leader with session ID {}. New leader information {}.",
-                            leaderContender.getDescription(),
-                            confirmedLeaderInformation.getLeaderSessionID(),
-                            leaderInformation);
-                }
+                LOG.trace(
+                        "Leader node changed while {} is the leader with session ID {}. New leader information {}.",
+                        leaderContender.getDescription(),
+                        confirmedLeaderInformation.getLeaderSessionID(),
+                        leaderInformation);
                 if (!confirmedLeaderInformation.isEmpty()) {
                     final LeaderInformation confirmedLeaderInfo = this.confirmedLeaderInformation;
                     if (leaderInformation.isEmpty()) {
-                        if (LOG.isDebugEnabled()) {
-                            LOG.debug(
-                                    "Writing leader information by {} since the external storage is empty.",
-                                    leaderContender.getDescription());
-                        }
+                        LOG.debug(
+                                "Writing leader information by {} since the external storage is empty.",
+                                leaderContender.getDescription());
                         leaderElectionDriver.writeLeaderInformation(confirmedLeaderInfo);
                     } else if (!leaderInformation.equals(confirmedLeaderInfo)) {
                         // the data field does not correspond to the expected leader information
-                        if (LOG.isDebugEnabled()) {
-                            LOG.debug(
-                                    "Correcting leader information by {}.",
-                                    leaderContender.getDescription());
-                        }
+                        LOG.debug(
+                                "Correcting leader information by {}.",
+                                leaderContender.getDescription());
                         leaderElectionDriver.writeLeaderInformation(confirmedLeaderInfo);
                     }
                 }
             } else {
-                if (LOG.isDebugEnabled()) {
-                    LOG.debug(
-                            "Ignoring change notification since the {} has "
-                                    + "already been closed.",
-                            leaderElectionDriver);
-                }
+                LOG.debug(
+                        "Ignoring change notification since the {} has already been closed.",
+                        leaderElectionDriver);
             }
+        }
+    }
+
+    private void runInLeaderEventThread(Runnable callback) {
+        if (running) {
+            FutureUtils.handleUncaughtException(
+                    CompletableFuture.runAsync(callback, leadershipOperationExecutor),
+                    (thread, error) -> forwardErrorToLeaderContender(error));
+        }
+    }
+
+    private void forwardErrorToLeaderContender(Throwable t) {
+        if (t instanceof LeaderElectionException) {
+            leaderContender.handleError((LeaderElectionException) t);
+        } else {
+            leaderContender.handleError(new LeaderElectionException(t));
         }
     }
 
@@ -295,18 +323,11 @@ public class DefaultLeaderElectionService
         public void onFatalError(Throwable throwable) {
             synchronized (lock) {
                 if (!running) {
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug(
-                                "Ignoring error notification since the service has been stopped.");
-                    }
+                    LOG.debug("Ignoring error notification since the service has been stopped.");
                     return;
                 }
 
-                if (throwable instanceof LeaderElectionException) {
-                    leaderContender.handleError((LeaderElectionException) throwable);
-                } else {
-                    leaderContender.handleError(new LeaderElectionException(throwable));
-                }
+                forwardErrorToLeaderContender(throwable);
             }
         }
     }

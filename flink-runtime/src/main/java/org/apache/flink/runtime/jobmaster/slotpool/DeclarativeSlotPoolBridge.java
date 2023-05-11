@@ -153,14 +153,13 @@ public class DeclarativeSlotPoolBridge extends DeclarativeSlotPoolService implem
         }
 
         if (isJobRestarting) {
-            getDeclarativeSlotPool()
+            return getDeclarativeSlotPool()
                     .registerSlots(
                             offers,
                             taskManagerLocation,
                             taskManagerGateway,
                             getRelativeTimeMillis());
 
-            return offers;
         } else {
             return getDeclarativeSlotPool()
                     .offerSlots(
@@ -326,7 +325,10 @@ public class DeclarativeSlotPoolBridge extends DeclarativeSlotPoolService implem
                             pendingRequest.getSlotFuture(),
                             timeout.toMilliseconds(),
                             TimeUnit.MILLISECONDS,
-                            componentMainThreadExecutor)
+                            componentMainThreadExecutor,
+                            String.format(
+                                    "Pending slot request %s timed out after %d ms.",
+                                    pendingRequest.getSlotRequestId(), timeout.toMilliseconds()))
                     .whenComplete(
                             (physicalSlot, throwable) -> {
                                 if (throwable instanceof TimeoutException) {
@@ -398,8 +400,9 @@ public class DeclarativeSlotPoolBridge extends DeclarativeSlotPoolService implem
     }
 
     private void failPendingRequests(Collection<ResourceRequirement> acquiredResources) {
-        Predicate<PendingRequest> predicate =
-                request -> !isBatchSlotRequestTimeoutCheckDisabled || !request.isBatchRequest();
+        // only fails streaming requests because batch jobs do not require all resources
+        // requirements to be fullfilled at the same time
+        Predicate<PendingRequest> predicate = request -> !request.isBatchRequest();
         if (pendingRequests.values().stream().anyMatch(predicate)) {
             log.warn(
                     "Could not acquire the minimum required resources, failing slot requests. Acquired: {}. Current slot pool status: {}",

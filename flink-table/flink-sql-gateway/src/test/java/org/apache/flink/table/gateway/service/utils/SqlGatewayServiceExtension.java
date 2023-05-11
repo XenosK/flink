@@ -18,12 +18,14 @@
 
 package org.apache.flink.table.gateway.service.utils;
 
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.testutils.CommonTestUtils;
 import org.apache.flink.table.gateway.api.SqlGatewayService;
 import org.apache.flink.table.gateway.service.SqlGatewayServiceImpl;
 import org.apache.flink.table.gateway.service.context.DefaultContext;
 import org.apache.flink.table.gateway.service.session.SessionManager;
 
+import org.apache.commons.io.FileUtils;
 import org.junit.jupiter.api.extension.AfterAllCallback;
 import org.junit.jupiter.api.extension.BeforeAllCallback;
 import org.junit.jupiter.api.extension.Extension;
@@ -32,8 +34,12 @@ import org.junit.rules.TemporaryFolder;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static org.apache.flink.configuration.ConfigConstants.ENV_FLINK_CONF_DIR;
 
@@ -43,6 +49,19 @@ public class SqlGatewayServiceExtension implements BeforeAllCallback, AfterAllCa
     private SqlGatewayService service;
     private SessionManager sessionManager;
     private TemporaryFolder temporaryFolder;
+    private final Supplier<Configuration> configSupplier;
+    private final Function<DefaultContext, SessionManager> sessionManagerCreator;
+
+    public SqlGatewayServiceExtension(Supplier<Configuration> configSupplier) {
+        this(configSupplier, SessionManager::create);
+    }
+
+    public SqlGatewayServiceExtension(
+            Supplier<Configuration> configSupplier,
+            Function<DefaultContext, SessionManager> sessionManagerCreator) {
+        this.configSupplier = configSupplier;
+        this.sessionManagerCreator = sessionManagerCreator;
+    }
 
     @Override
     public void beforeAll(ExtensionContext context) throws Exception {
@@ -57,12 +76,20 @@ public class SqlGatewayServiceExtension implements BeforeAllCallback, AfterAllCa
                 throw new IOException("Can't create testing flink-conf.yaml file.");
             }
 
+            FileUtils.write(
+                    confYaml,
+                    getFlinkConfContent(configSupplier.get().toMap()),
+                    StandardCharsets.UTF_8);
+
             // adjust the test environment for the purposes of this test
             Map<String, String> map = new HashMap<>(System.getenv());
             map.put(ENV_FLINK_CONF_DIR, confFolder.getAbsolutePath());
             CommonTestUtils.setEnv(map);
 
-            sessionManager = new SessionManager(DefaultContext.load(new HashMap<>()));
+            sessionManager =
+                    sessionManagerCreator.apply(
+                            DefaultContext.load(
+                                    new Configuration(), Collections.emptyList(), true, false));
         } finally {
             CommonTestUtils.setEnv(originalEnv);
         }
@@ -85,5 +112,11 @@ public class SqlGatewayServiceExtension implements BeforeAllCallback, AfterAllCa
 
     public SessionManager getSessionManager() {
         return sessionManager;
+    }
+
+    private String getFlinkConfContent(Map<String, String> flinkConf) {
+        StringBuilder sb = new StringBuilder();
+        flinkConf.forEach((k, v) -> sb.append(k).append(": ").append(v).append("\n"));
+        return sb.toString();
     }
 }

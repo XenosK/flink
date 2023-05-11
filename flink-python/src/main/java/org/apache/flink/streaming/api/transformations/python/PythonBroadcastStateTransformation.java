@@ -17,20 +17,15 @@
 
 package org.apache.flink.streaming.api.transformations.python;
 
-import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.state.MapStateDescriptor;
-import org.apache.flink.api.common.typeinfo.PrimitiveArrayTypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
-import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.python.DataStreamPythonFunctionInfo;
+import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
 import org.apache.flink.streaming.api.transformations.AbstractBroadcastStateTransformation;
-import org.apache.flink.streaming.api.utils.ByteArrayWrapper;
-import org.apache.flink.streaming.api.utils.ByteArrayWrapperSerializer;
 
-import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 
 /**
@@ -38,11 +33,14 @@ import java.util.List;
  * translated into different operations by {@link
  * org.apache.flink.streaming.runtime.translators.python.PythonBroadcastStateTransformationTranslator}.
  */
+@Internal
 public class PythonBroadcastStateTransformation<IN1, IN2, OUT>
-        extends AbstractBroadcastStateTransformation<IN1, IN2, OUT> {
+        extends AbstractBroadcastStateTransformation<IN1, IN2, OUT>
+        implements DelegateOperatorTransformation<OUT> {
 
     private final Configuration configuration;
     private final DataStreamPythonFunctionInfo dataStreamPythonFunctionInfo;
+    private final SimpleOperatorFactory<OUT> delegateOperatorFactory;
 
     public PythonBroadcastStateTransformation(
             String name,
@@ -62,6 +60,7 @@ public class PythonBroadcastStateTransformation<IN1, IN2, OUT>
                 parallelism);
         this.configuration = configuration;
         this.dataStreamPythonFunctionInfo = dataStreamPythonFunctionInfo;
+        this.delegateOperatorFactory = SimpleOperatorFactory.of(new DelegateOperator<>());
         updateManagedMemoryStateBackendUseCase(false);
     }
 
@@ -73,18 +72,7 @@ public class PythonBroadcastStateTransformation<IN1, IN2, OUT>
         return dataStreamPythonFunctionInfo;
     }
 
-    public static List<MapStateDescriptor<ByteArrayWrapper, byte[]>>
-            convertStateNamesToStateDescriptors(Collection<String> names) {
-        List<MapStateDescriptor<ByteArrayWrapper, byte[]>> descriptors =
-                new ArrayList<>(names.size());
-        TypeSerializer<byte[]> byteArraySerializer =
-                PrimitiveArrayTypeInfo.BYTE_PRIMITIVE_ARRAY_TYPE_INFO.createSerializer(
-                        new ExecutionConfig());
-        for (String name : names) {
-            descriptors.add(
-                    new MapStateDescriptor<>(
-                            name, ByteArrayWrapperSerializer.INSTANCE, byteArraySerializer));
-        }
-        return descriptors;
+    public SimpleOperatorFactory<OUT> getOperatorFactory() {
+        return delegateOperatorFactory;
     }
 }

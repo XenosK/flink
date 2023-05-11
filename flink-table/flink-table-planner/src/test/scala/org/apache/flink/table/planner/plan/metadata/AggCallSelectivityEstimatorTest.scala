@@ -28,7 +28,9 @@ import org.apache.flink.util.Preconditions
 import com.google.common.collect.ImmutableList
 import org.apache.calcite.jdbc.CalciteSchema
 import org.apache.calcite.rel.`type`.RelDataType
+import org.apache.calcite.rel.RelCollations
 import org.apache.calcite.rel.core.{Aggregate, AggregateCall, TableScan}
+import org.apache.calcite.rel.hint.RelHint
 import org.apache.calcite.rel.logical.LogicalAggregate
 import org.apache.calcite.rel.metadata.{JaninoRelMetadataProvider, RelMetadataQueryBase}
 import org.apache.calcite.rex.{RexInputRef, RexLiteral, RexNode}
@@ -103,8 +105,11 @@ class AggCallSelectivityEstimatorTest {
           sqlAggFun,
           false,
           false,
+          false,
           ImmutableList.of(Integer.valueOf(arg)),
           -1,
+          null,
+          RelCollations.EMPTY,
           groupSet.length,
           scan,
           aggCallType,
@@ -114,6 +119,7 @@ class AggCallSelectivityEstimatorTest {
 
     LogicalAggregate.create(
       scan,
+      ImmutableList.of[RelHint],
       ImmutableBitSet.of(groupSet: _*),
       null,
       ImmutableList.copyOf(aggCalls.toArray))

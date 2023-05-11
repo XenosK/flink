@@ -18,10 +18,14 @@
 
 package org.apache.flink.streaming.runtime.tasks;
 
+import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.memory.ManagedMemoryUseCase;
+import org.apache.flink.runtime.io.network.partition.ResultPartitionType;
+import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
+import org.apache.flink.streaming.api.graph.NonChainedOutput;
 import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.api.graph.StreamEdge;
 import org.apache.flink.streaming.api.graph.StreamNode;
@@ -32,13 +36,18 @@ import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.streaming.runtime.partitioner.BroadcastPartitioner;
+import org.apache.flink.streaming.runtime.partitioner.StreamPartitioner;
+import org.apache.flink.util.OutputTag;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
+import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.Preconditions.checkState;
 
@@ -53,6 +62,10 @@ public class StreamConfigChainer<OWNER> {
 
     private StreamConfig tailConfig;
     private int chainIndex = MAIN_NODE_ID;
+
+    private final List<List<NonChainedOutput>> outEdgesInOrder = new LinkedList<>();
+
+    private boolean setTailNonChainedOutputs = true;
 
     StreamConfigChainer(
             OperatorID headOperatorID,
@@ -73,6 +86,11 @@ public class StreamConfigChainer<OWNER> {
         headConfig.setChainIndex(chainIndex);
     }
 
+    /**
+     * @deprecated Use {@link #chain(TypeSerializer)} or {@link #chain(TypeSerializer,
+     *     TypeSerializer)} instead.
+     */
+    @Deprecated
     public <T> StreamConfigChainer<OWNER> chain(
             OperatorID operatorID,
             OneInputStreamOperator<T, T> operator,
@@ -81,11 +99,21 @@ public class StreamConfigChainer<OWNER> {
         return chain(operatorID, operator, typeSerializer, typeSerializer, createKeyedStateBackend);
     }
 
+    /**
+     * @deprecated Use {@link #chain(TypeSerializer)} or {@link #chain(TypeSerializer,
+     *     TypeSerializer)} instead.
+     */
+    @Deprecated
     public <T> StreamConfigChainer<OWNER> chain(
             OneInputStreamOperator<T, T> operator, TypeSerializer<T> typeSerializer) {
         return chain(new OperatorID(), operator, typeSerializer);
     }
 
+    /**
+     * @deprecated Use {@link #chain(TypeSerializer)} or {@link #chain(TypeSerializer,
+     *     TypeSerializer)} instead.
+     */
+    @Deprecated
     public <T> StreamConfigChainer<OWNER> chain(
             OperatorID operatorID,
             OneInputStreamOperator<T, T> operator,
@@ -93,11 +121,21 @@ public class StreamConfigChainer<OWNER> {
         return chain(operatorID, operator, typeSerializer, typeSerializer, false);
     }
 
+    /**
+     * @deprecated Use {@link #chain(TypeSerializer)} or {@link #chain(TypeSerializer,
+     *     TypeSerializer)} instead.
+     */
+    @Deprecated
     public <T> StreamConfigChainer<OWNER> chain(
             OneInputStreamOperatorFactory<T, T> operatorFactory, TypeSerializer<T> typeSerializer) {
         return chain(new OperatorID(), operatorFactory, typeSerializer);
     }
 
+    /**
+     * @deprecated Use {@link #chain(TypeSerializer)} or {@link #chain(TypeSerializer,
+     *     TypeSerializer)} instead.
+     */
+    @Deprecated
     public <T> StreamConfigChainer<OWNER> chain(
             OperatorID operatorID,
             OneInputStreamOperatorFactory<T, T> operatorFactory,
@@ -105,6 +143,11 @@ public class StreamConfigChainer<OWNER> {
         return chain(operatorID, operatorFactory, typeSerializer, typeSerializer, false);
     }
 
+    /**
+     * @deprecated Use {@link #chain(TypeSerializer)} or {@link #chain(TypeSerializer,
+     *     TypeSerializer)} instead.
+     */
+    @Deprecated
     private <IN, OUT> StreamConfigChainer<OWNER> chain(
             OperatorID operatorID,
             OneInputStreamOperator<IN, OUT> operator,
@@ -119,6 +162,11 @@ public class StreamConfigChainer<OWNER> {
                 createKeyedStateBackend);
     }
 
+    /**
+     * @deprecated Use {@link #chain(TypeSerializer)} or {@link #chain(TypeSerializer,
+     *     TypeSerializer)} instead.
+     */
+    @Deprecated
     public <IN, OUT> StreamConfigChainer<OWNER> chain(
             OperatorID operatorID,
             StreamOperatorFactory<OUT> operatorFactory,
@@ -157,47 +205,65 @@ public class StreamConfigChainer<OWNER> {
                     ManagedMemoryUseCase.STATE_BACKEND, 1.0);
         }
         tailConfig.setChainIndex(chainIndex);
+        tailConfig.serializeAllConfigs();
 
         chainedConfigs.put(chainIndex, tailConfig);
 
         return this;
     }
 
-    public OWNER finish() {
-        checkState(chainIndex > 0, "Use finishForSingletonOperatorChain");
-        List<StreamEdge> outEdgesInOrder = new LinkedList<StreamEdge>();
+    public <T> StreamConfigEdgeChainer<OWNER, T, T> chain(TypeSerializer<T> typeSerializer) {
+        return chain(typeSerializer, typeSerializer);
+    }
 
-        StreamNode sourceVertex =
-                new StreamNode(chainIndex, null, null, (StreamOperator<?>) null, null, null);
-        for (int i = 0; i < numberOfNonChainedOutputs; ++i) {
-            StreamEdge streamEdge =
-                    new StreamEdge(
-                            sourceVertex,
-                            new StreamNode(
-                                    chainIndex + i,
-                                    null,
-                                    null,
-                                    (StreamOperator<?>) null,
-                                    null,
-                                    null),
-                            0,
-                            new BroadcastPartitioner<>(),
-                            null);
-            streamEdge.setBufferTimeout(1);
-            outEdgesInOrder.add(streamEdge);
+    public <IN, OUT> StreamConfigEdgeChainer<OWNER, IN, OUT> chain(
+            TypeSerializer<IN> inputSerializer, TypeSerializer<OUT> outputSerializer) {
+        return new StreamConfigEdgeChainer<>(this, inputSerializer, outputSerializer);
+    }
+
+    public OWNER finish() {
+        if (setTailNonChainedOutputs) {
+            List<NonChainedOutput> nonChainedOutputs = new ArrayList<>();
+            for (int i = 0; i < numberOfNonChainedOutputs; ++i) {
+                NonChainedOutput streamOutput =
+                        new NonChainedOutput(
+                                true,
+                                chainIndex,
+                                1,
+                                1,
+                                100,
+                                false,
+                                new IntermediateDataSetID(),
+                                null,
+                                new BroadcastPartitioner<>(),
+                                ResultPartitionType.PIPELINED_BOUNDED);
+                nonChainedOutputs.add(streamOutput);
+            }
+            outEdgesInOrder.add(nonChainedOutputs);
+            tailConfig.setNumberOfOutputs(numberOfNonChainedOutputs);
+            tailConfig.setVertexNonChainedOutputs(nonChainedOutputs);
+            tailConfig.setOperatorNonChainedOutputs(nonChainedOutputs);
         }
 
+        Collections.reverse(outEdgesInOrder);
+        List<NonChainedOutput> allOutEdgesInOrder =
+                outEdgesInOrder.stream().flatMap(List::stream).collect(Collectors.toList());
+
         tailConfig.setChainEnd();
-        tailConfig.setNumberOfOutputs(numberOfNonChainedOutputs);
-        tailConfig.setOutEdgesInOrder(outEdgesInOrder);
-        tailConfig.setNonChainedOutputs(outEdgesInOrder);
-        headConfig.setTransitiveChainedTaskConfigs(chainedConfigs);
-        headConfig.setOutEdgesInOrder(outEdgesInOrder);
+        chainedConfigs.values().forEach(StreamConfig::serializeAllConfigs);
+        headConfig.setAndSerializeTransitiveChainedTaskConfigs(chainedConfigs);
+        headConfig.setVertexNonChainedOutputs(allOutEdgesInOrder);
+        headConfig.serializeAllConfigs();
 
         return owner;
     }
 
     public <OUT> OWNER finishForSingletonOperatorChain(TypeSerializer<OUT> outputSerializer) {
+        return finishForSingletonOperatorChain(outputSerializer, new BroadcastPartitioner<>());
+    }
+
+    public <OUT> OWNER finishForSingletonOperatorChain(
+            TypeSerializer<OUT> outputSerializer, StreamPartitioner<?> partitioner) {
 
         checkState(chainIndex == 0, "Use finishForSingletonOperatorChain");
         checkState(headConfig == tailConfig);
@@ -205,7 +271,7 @@ public class StreamConfigChainer<OWNER> {
                 new AbstractStreamOperator<OUT>() {
                     private static final long serialVersionUID = 1L;
                 };
-        List<StreamEdge> outEdgesInOrder = new LinkedList<>();
+        List<NonChainedOutput> streamOutputs = new LinkedList<>();
 
         StreamNode sourceVertexDummy =
                 new StreamNode(
@@ -216,31 +282,29 @@ public class StreamConfigChainer<OWNER> {
                         "source dummy",
                         SourceStreamTask.class);
         for (int i = 0; i < numberOfNonChainedOutputs; ++i) {
-            StreamNode targetVertexDummy =
-                    new StreamNode(
-                            MAIN_NODE_ID + 1 + i,
-                            "group",
+            streamOutputs.add(
+                    new NonChainedOutput(
+                            true,
+                            sourceVertexDummy.getId(),
+                            1,
+                            1,
+                            100,
+                            false,
+                            new IntermediateDataSetID(),
                             null,
-                            dummyOperator,
-                            "target dummy",
-                            SourceStreamTask.class);
-
-            outEdgesInOrder.add(
-                    new StreamEdge(
-                            sourceVertexDummy,
-                            targetVertexDummy,
-                            0,
-                            new BroadcastPartitioner<>(),
-                            null));
+                            partitioner,
+                            ResultPartitionType.PIPELINED_BOUNDED));
         }
 
         headConfig.setVertexID(0);
         headConfig.setNumberOfOutputs(1);
-        headConfig.setOutEdgesInOrder(outEdgesInOrder);
-        headConfig.setNonChainedOutputs(outEdgesInOrder);
-        headConfig.setTransitiveChainedTaskConfigs(chainedConfigs);
-        headConfig.setOutEdgesInOrder(outEdgesInOrder);
+        headConfig.setVertexNonChainedOutputs(streamOutputs);
+        headConfig.setOperatorNonChainedOutputs(streamOutputs);
+        chainedConfigs.values().forEach(StreamConfig::serializeAllConfigs);
+        headConfig.setAndSerializeTransitiveChainedTaskConfigs(chainedConfigs);
+        headConfig.setVertexNonChainedOutputs(streamOutputs);
         headConfig.setTypeSerializerOut(outputSerializer);
+        headConfig.serializeAllConfigs();
 
         return owner;
     }
@@ -252,5 +316,144 @@ public class StreamConfigChainer<OWNER> {
 
     public void setBufferTimeout(int bufferTimeout) {
         this.bufferTimeout = bufferTimeout;
+    }
+
+    /** Helper class to build operator node. */
+    public static class StreamConfigEdgeChainer<OWNER, IN, OUT> {
+        private final OutputTag<Void> placeHolderTag;
+        private StreamConfigChainer<OWNER> parent;
+        private OperatorID operatorID;
+
+        private final TypeSerializer<IN> inputSerializer;
+        private final TypeSerializer<OUT> outputSerializer;
+
+        private StreamOperatorFactory<OUT> operatorFactory;
+
+        private Map<OutputTag<?>, Integer> nonChainedOutPuts;
+        private boolean createKeyedStateBackend;
+
+        private StreamConfigEdgeChainer(
+                StreamConfigChainer<OWNER> parent,
+                TypeSerializer<IN> inputSerializer,
+                TypeSerializer<OUT> outputSerializer) {
+            this.parent = parent;
+            this.parent.setTailNonChainedOutputs = true;
+
+            this.inputSerializer = inputSerializer;
+            this.outputSerializer = outputSerializer;
+            this.placeHolderTag =
+                    new OutputTag<>("FLINK_PLACEHOLDER", BasicTypeInfo.VOID_TYPE_INFO);
+            this.nonChainedOutPuts = new HashMap<>(4);
+        }
+
+        public StreamConfigEdgeChainer<OWNER, IN, OUT> setOperatorID(OperatorID operatorID) {
+            this.operatorID = operatorID;
+            return this;
+        }
+
+        public StreamConfigEdgeChainer<OWNER, IN, OUT> setOperatorFactory(
+                StreamOperatorFactory operatorFactory) {
+            this.operatorFactory = operatorFactory;
+            return this;
+        }
+
+        public StreamConfigEdgeChainer<OWNER, IN, OUT> addNonChainedOutputsCount(
+                int nonChainedOutputsCount) {
+            return addNonChainedOutputsCount(placeHolderTag, nonChainedOutputsCount);
+        }
+
+        public StreamConfigEdgeChainer<OWNER, IN, OUT> addNonChainedOutputsCount(
+                OutputTag<?> outputTag, int nonChainedOutputsCount) {
+            checkArgument(nonChainedOutputsCount >= 0 && outputTag != null);
+            this.nonChainedOutPuts.put(outputTag, nonChainedOutputsCount);
+            return this;
+        }
+
+        public StreamConfigEdgeChainer<OWNER, IN, OUT> setCreateKeyedStateBackend(
+                boolean createKeyedStateBackend) {
+            this.createKeyedStateBackend = createKeyedStateBackend;
+            return this;
+        }
+
+        public StreamConfigChainer<OWNER> build() {
+            parent.chainIndex++;
+
+            StreamEdge streamEdge =
+                    new StreamEdge(
+                            new StreamNode(
+                                    parent.tailConfig.getChainIndex(),
+                                    null,
+                                    null,
+                                    (StreamOperator<?>) null,
+                                    null,
+                                    null),
+                            new StreamNode(
+                                    parent.chainIndex,
+                                    null,
+                                    null,
+                                    (StreamOperator<?>) null,
+                                    null,
+                                    null),
+                            0,
+                            null,
+                            null);
+            streamEdge.setBufferTimeout(parent.bufferTimeout);
+            parent.tailConfig.setChainedOutputs(Collections.singletonList(streamEdge));
+            parent.tailConfig = new StreamConfig(new Configuration());
+            parent.tailConfig.setStreamOperatorFactory(checkNotNull(operatorFactory));
+            parent.tailConfig.setOperatorID(operatorID == null ? new OperatorID() : operatorID);
+            parent.tailConfig.setupNetworkInputs(inputSerializer);
+            parent.tailConfig.setTypeSerializerOut(outputSerializer);
+            if (createKeyedStateBackend) {
+                // used to test multiple stateful operators chained in a single task.
+                parent.tailConfig.setStateKeySerializer(inputSerializer);
+                parent.tailConfig.setStateBackendUsesManagedMemory(true);
+                parent.tailConfig.setManagedMemoryFractionOperatorOfUseCase(
+                        ManagedMemoryUseCase.STATE_BACKEND, 1.0);
+            }
+            if (!nonChainedOutPuts.isEmpty()) {
+                List<NonChainedOutput> nonChainedOutputs =
+                        createNonChainedOutputs(nonChainedOutPuts, streamEdge);
+
+                parent.tailConfig.setVertexNonChainedOutputs(nonChainedOutputs);
+                parent.tailConfig.setOperatorNonChainedOutputs(nonChainedOutputs);
+                parent.chainedConfigs.values().forEach(StreamConfig::serializeAllConfigs);
+                parent.tailConfig.setNumberOfOutputs(nonChainedOutputs.size());
+                parent.outEdgesInOrder.add(nonChainedOutputs);
+                parent.setTailNonChainedOutputs = false;
+            }
+            parent.tailConfig.setChainIndex(parent.chainIndex);
+            parent.tailConfig.serializeAllConfigs();
+
+            parent.chainedConfigs.put(parent.chainIndex, parent.tailConfig);
+            return parent;
+        }
+
+        private List<NonChainedOutput> createNonChainedOutputs(
+                Map<OutputTag<?>, Integer> nonChainedOutputsCount, StreamEdge streamEdge) {
+            List<NonChainedOutput> nonChainedOutputs = new ArrayList<>();
+            nonChainedOutputsCount.forEach(
+                    (outputTag, value) -> {
+                        for (int i = 0; i < value; i++) {
+                            nonChainedOutputs.add(
+                                    new NonChainedOutput(
+                                            true,
+                                            streamEdge.getTargetId(),
+                                            1,
+                                            1,
+                                            100,
+                                            false,
+                                            new IntermediateDataSetID(),
+                                            placeHolderTag.equals(outputTag) ? null : outputTag,
+                                            new BroadcastPartitioner<>(),
+                                            ResultPartitionType.PIPELINED_BOUNDED));
+                            if (!placeHolderTag.equals(outputTag)) {
+                                parent.tailConfig.setTypeSerializerSideOut(
+                                        outputTag, outputSerializer);
+                            }
+                        }
+                    });
+            return nonChainedOutputs;
+        }
     }
 }

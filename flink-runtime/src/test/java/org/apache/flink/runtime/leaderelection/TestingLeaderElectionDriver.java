@@ -69,11 +69,15 @@ public class TestingLeaderElectionDriver implements LeaderElectionDriver {
         return leaderInformation;
     }
 
-    public void isLeader() {
+    public void isLeader(UUID newSessionID) {
         synchronized (lock) {
             isLeader.set(true);
-            leaderElectionEventHandler.onGrantLeadership(UUID.randomUUID());
+            leaderElectionEventHandler.onGrantLeadership(newSessionID);
         }
+    }
+
+    public void isLeader() {
+        isLeader(UUID.randomUUID());
     }
 
     public void notLeader() {
@@ -100,8 +104,7 @@ public class TestingLeaderElectionDriver implements LeaderElectionDriver {
         @Override
         public LeaderElectionDriver createLeaderElectionDriver(
                 LeaderElectionEventHandler leaderEventHandler,
-                FatalErrorHandler fatalErrorHandler,
-                String leaderContenderDescription) {
+                FatalErrorHandler fatalErrorHandler) {
             currentLeaderDriver =
                     new TestingLeaderElectionDriver(leaderEventHandler, fatalErrorHandler);
             return currentLeaderDriver;

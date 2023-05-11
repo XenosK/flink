@@ -50,12 +50,15 @@ import org.apache.flink.runtime.checkpoint.CheckpointType;
 import org.apache.flink.runtime.checkpoint.SavepointType;
 import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
+import org.apache.flink.runtime.io.AvailabilityProvider;
 import org.apache.flink.runtime.io.network.api.CancelCheckpointMarker;
 import org.apache.flink.runtime.io.network.api.CheckpointBarrier;
 import org.apache.flink.runtime.io.network.api.EndOfData;
 import org.apache.flink.runtime.io.network.api.EndOfPartitionEvent;
 import org.apache.flink.runtime.io.network.api.StopMode;
+import org.apache.flink.runtime.io.network.api.writer.RecordOrEventCollectingResultPartitionWriter;
 import org.apache.flink.runtime.io.network.api.writer.ResultPartitionWriter;
+import org.apache.flink.runtime.io.network.api.writer.ResultPartitionWriterWithAvailabilityHelper;
 import org.apache.flink.runtime.io.network.partition.PartitionTestUtils;
 import org.apache.flink.runtime.io.network.partition.ResultPartition;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionType;
@@ -82,12 +85,14 @@ import org.apache.flink.streaming.api.operators.BoundedOneInput;
 import org.apache.flink.streaming.api.operators.Input;
 import org.apache.flink.streaming.api.operators.MultipleInputStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
+import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
 import org.apache.flink.streaming.api.operators.SourceOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.io.StreamMultipleInputProcessor;
 import org.apache.flink.streaming.runtime.streamrecord.LatencyMarker;
+import org.apache.flink.streaming.runtime.streamrecord.StreamElementSerializer;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.MultipleInputStreamTaskChainedSourcesCheckpointingTest.LifeCycleMonitorMultipleInputOperatorFactory;
 import org.apache.flink.streaming.runtime.tasks.OneInputStreamTaskTest.WatermarkMetricOperator;
@@ -96,6 +101,7 @@ import org.apache.flink.streaming.util.CompletingCheckpointResponder;
 import org.apache.flink.streaming.util.TestHarnessUtil;
 import org.apache.flink.testutils.junit.SharedObjects;
 import org.apache.flink.testutils.junit.SharedReference;
+import org.apache.flink.util.OutputTag;
 import org.apache.flink.util.SerializedValue;
 
 import org.hamcrest.collection.IsMapContaining;
@@ -130,6 +136,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -892,6 +899,47 @@ public class MultipleInputStreamTaskTest {
         }
     }
 
+    /** The CanEmitBatchOfRecords should always be false for {@link MultipleInputStreamTask}. */
+    @Test
+    public void testCanEmitBatchOfRecords() throws Exception {
+        AvailabilityProvider.AvailabilityHelper availabilityHelper =
+                new AvailabilityProvider.AvailabilityHelper();
+        try (StreamTaskMailboxTestHarness<String> testHarness =
+                new StreamTaskMailboxTestHarnessBuilder<>(
+                                MultipleInputStreamTask::new, BasicTypeInfo.STRING_TYPE_INFO)
+                        .addInput(BasicTypeInfo.STRING_TYPE_INFO)
+                        .addInput(BasicTypeInfo.INT_TYPE_INFO)
+                        .addInput(BasicTypeInfo.DOUBLE_TYPE_INFO)
+                        .addAdditionalOutput(
+                                new ResultPartitionWriterWithAvailabilityHelper(availabilityHelper))
+                        .setupOperatorChain(new MapToStringMultipleInputOperatorFactory(3))
+                        .finishForSingletonOperatorChain(IntSerializer.INSTANCE)
+                        .build()) {
+            StreamTask.CanEmitBatchOfRecordsChecker canEmitBatchOfRecordsChecker =
+                    testHarness.streamTask.getCanEmitBatchOfRecords();
+            testHarness.processAll();
+
+            availabilityHelper.resetAvailable();
+            assertFalse(canEmitBatchOfRecordsChecker.check());
+
+            // The canEmitBatchOfRecordsChecker should be the false after the record writer is
+            // unavailable.
+            availabilityHelper.resetUnavailable();
+            assertFalse(canEmitBatchOfRecordsChecker.check());
+
+            // Restore record writer to available
+            availabilityHelper.resetAvailable();
+            assertFalse(canEmitBatchOfRecordsChecker.check());
+
+            // The canEmitBatchOfRecordsChecker should be the false after add the mail to mail box.
+            testHarness.streamTask.mainMailboxExecutor.execute(() -> {}, "mail");
+            assertFalse(canEmitBatchOfRecordsChecker.check());
+
+            testHarness.processAll();
+            assertFalse(canEmitBatchOfRecordsChecker.check());
+        }
+    }
+
     @Test
     public void testLatencyMarker() throws Exception {
         final Map<String, Metric> metrics = new ConcurrentHashMap<>();
@@ -1345,6 +1393,178 @@ public class MultipleInputStreamTaskTest {
                 .dispatchOperatorEvent(
                         getSourceOperatorID(testHarness, sourceId),
                         new SerializedValue<>(new NoMoreSplitsEvent()));
+    }
+
+    @Test
+    public void testTaskSideOutputStatistics() throws Exception {
+        TaskMetricGroup taskMetricGroup =
+                UnregisteredMetricGroups.createUnregisteredTaskMetricGroup();
+
+        ResultPartitionWriter[] partitionWriters = new ResultPartitionWriter[3];
+        for (int i = 0; i < partitionWriters.length; ++i) {
+            partitionWriters[i] =
+                    new RecordOrEventCollectingResultPartitionWriter<>(
+                            new ArrayDeque<>(),
+                            new StreamElementSerializer<>(
+                                    BasicTypeInfo.INT_TYPE_INFO.createSerializer(
+                                            new ExecutionConfig())));
+            partitionWriters[i].setup();
+        }
+
+        try (StreamTaskMailboxTestHarness<Integer> testHarness =
+                new StreamTaskMailboxTestHarnessBuilder<>(
+                                MultipleInputStreamTask::new, BasicTypeInfo.INT_TYPE_INFO)
+                        .modifyExecutionConfig(applyObjectReuse(objectReuse))
+                        .addInput(BasicTypeInfo.INT_TYPE_INFO)
+                        .addInput(BasicTypeInfo.INT_TYPE_INFO)
+                        .addInput(BasicTypeInfo.INT_TYPE_INFO)
+                        .addAdditionalOutput(partitionWriters)
+                        .setupOperatorChain(new PassThroughOperatorFactory<>())
+                        .chain(BasicTypeInfo.INT_TYPE_INFO.createSerializer(new ExecutionConfig()))
+                        .setOperatorFactory(
+                                SimpleOperatorFactory.of(
+                                        new OneInputStreamTaskTest.OddEvenOperator()))
+                        .addNonChainedOutputsCount(
+                                new OutputTag<>("odd", BasicTypeInfo.INT_TYPE_INFO), 2)
+                        .addNonChainedOutputsCount(1)
+                        .build()
+                        .chain(BasicTypeInfo.INT_TYPE_INFO.createSerializer(new ExecutionConfig()))
+                        .setOperatorFactory(
+                                SimpleOperatorFactory.of(
+                                        new OneInputStreamTaskTest.DuplicatingOperator()))
+                        .addNonChainedOutputsCount(1)
+                        .build()
+                        .finish()
+                        .setTaskMetricGroup(taskMetricGroup)
+                        .build()) {
+            Counter numRecordsInCounter =
+                    taskMetricGroup.getIOMetricGroup().getNumRecordsInCounter();
+            Counter numRecordsOutCounter =
+                    taskMetricGroup.getIOMetricGroup().getNumRecordsOutCounter();
+
+            int numOddRecords = 5;
+            int numEvenRecords = 3;
+            int numNaturalRecords = 2;
+            for (int x = 0; x < numOddRecords; x++) {
+                testHarness.processElement(new StreamRecord<>(x * 2 + 1));
+            }
+            for (int x = 0; x < numEvenRecords; x++) {
+                testHarness.processElement(new StreamRecord<>(x * 2));
+            }
+            for (int x = 0; x < numNaturalRecords; x++) {
+                testHarness.processElement(new StreamRecord<>(x));
+            }
+
+            int totalOddRecords = numOddRecords + numNaturalRecords / 2;
+            int totalEvenRecords = numEvenRecords + (int) Math.ceil(numNaturalRecords / 2.0);
+
+            final int oddEvenOperatorOutputsWithOddTag = totalOddRecords;
+            final int oddEvenOperatorOutputsWithoutTag = totalOddRecords + totalEvenRecords;
+            final int duplicatingOperatorOutput = (totalOddRecords + totalEvenRecords) * 2;
+            assertEquals(totalOddRecords + totalEvenRecords, numRecordsInCounter.getCount());
+            assertEquals(
+                    oddEvenOperatorOutputsWithOddTag
+                            + oddEvenOperatorOutputsWithoutTag
+                            + duplicatingOperatorOutput,
+                    numRecordsOutCounter.getCount());
+            testHarness.waitForTaskCompletion();
+        } finally {
+            for (ResultPartitionWriter partitionWriter : partitionWriters) {
+                partitionWriter.close();
+            }
+        }
+    }
+
+    static class PassThroughOperator<T> extends AbstractStreamOperatorV2<T>
+            implements MultipleInputStreamOperator<T> {
+
+        public PassThroughOperator(StreamOperatorParameters<T> parameters) {
+            super(parameters, 3);
+        }
+
+        @Override
+        public List<Input> getInputs() {
+            return Arrays.asList(
+                    new PassThroughInput<>(this, 1),
+                    new PassThroughInput<>(this, 2),
+                    new PassThroughInput<>(this, 3));
+        }
+
+        static class PassThroughInput<I> extends AbstractInput<I, I> {
+
+            public PassThroughInput(AbstractStreamOperatorV2<I> owner, int inputId) {
+                super(owner, inputId);
+            }
+
+            @Override
+            public void processElement(StreamRecord<I> element) throws Exception {
+                output.collect(element);
+            }
+        }
+    }
+
+    private static class PassThroughOperatorFactory<T> extends AbstractStreamOperatorFactory<T> {
+        @Override
+        public <O extends StreamOperator<T>> O createStreamOperator(
+                StreamOperatorParameters<T> parameters) {
+            return (O) new PassThroughOperator<>(parameters);
+        }
+
+        @Override
+        public Class<? extends StreamOperator> getStreamOperatorClass(ClassLoader classLoader) {
+            return PassThroughOperator.class;
+        }
+    }
+
+    static class OddEvenOperator extends AbstractStreamOperatorV2<Integer>
+            implements MultipleInputStreamOperator<Integer> {
+
+        public OddEvenOperator(StreamOperatorParameters<Integer> parameters) {
+            super(parameters, 3);
+        }
+
+        @Override
+        public List<Input> getInputs() {
+            return Arrays.asList(
+                    new OddEvenInput(this, 1),
+                    new OddEvenInput(this, 2),
+                    new OddEvenInput(this, 3));
+        }
+
+        static class OddEvenInput extends AbstractInput<Integer, Integer> {
+            private final OutputTag<Integer> oddOutputTag =
+                    new OutputTag<>("odd", BasicTypeInfo.INT_TYPE_INFO);
+            private final OutputTag<Integer> evenOutputTag =
+                    new OutputTag<>("even", BasicTypeInfo.INT_TYPE_INFO);
+
+            public OddEvenInput(AbstractStreamOperatorV2<Integer> owner, int inputId) {
+                super(owner, inputId);
+            }
+
+            @Override
+            public void processElement(StreamRecord<Integer> element) throws Exception {
+                if (element.getValue() % 2 == 0) {
+                    output.collect(evenOutputTag, element);
+                } else {
+                    output.collect(oddOutputTag, element);
+                }
+                output.collect(element);
+            }
+        }
+    }
+
+    private static class OddEvenOperatorFactory extends AbstractStreamOperatorFactory<Integer> {
+        @Override
+        public <T extends StreamOperator<Integer>> T createStreamOperator(
+                StreamOperatorParameters<Integer> parameters) {
+            return (T) new OddEvenOperator(parameters);
+        }
+
+        @Override
+        public Class<? extends StreamOperator<Integer>> getStreamOperatorClass(
+                ClassLoader classLoader) {
+            return OddEvenOperator.class;
+        }
     }
 
     static class LifeCycleTrackingMapToStringMultipleInputOperator

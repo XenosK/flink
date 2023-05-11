@@ -32,6 +32,7 @@ import org.apache.flink.table.runtime.groupwindow._
 import org.apache.calcite.plan.{RelOptRule, RelOptRuleCall, RelTraitSet}
 import org.apache.calcite.rel.RelNode
 import org.apache.calcite.rel.convert.ConverterRule
+import org.apache.calcite.rel.convert.ConverterRule.Config
 import org.apache.calcite.rel.core.Aggregate.Group
 import org.apache.calcite.rex.{RexInputRef, RexProgram}
 
@@ -39,18 +40,13 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
 /** Rule to convert a [[FlinkLogicalAggregate]] into a [[StreamPhysicalWindowAggregate]]. */
-class StreamPhysicalWindowAggregateRule
-  extends ConverterRule(
-    classOf[FlinkLogicalAggregate],
-    FlinkConventions.LOGICAL,
-    FlinkConventions.STREAM_PHYSICAL,
-    "StreamPhysicalWindowAggregateRule") {
+class StreamPhysicalWindowAggregateRule(config: Config) extends ConverterRule(config) {
 
   override def matches(call: RelOptRuleCall): Boolean = {
     val agg: FlinkLogicalAggregate = call.rel(0)
 
     // check if we have grouping sets
-    if (agg.getGroupType != Group.SIMPLE || agg.indicator) {
+    if (agg.getGroupType != Group.SIMPLE) {
       throw new TableException("GROUPING SETS are currently not supported.")
     }
 
@@ -247,7 +243,12 @@ class StreamPhysicalWindowAggregateRule
 }
 
 object StreamPhysicalWindowAggregateRule {
-  val INSTANCE = new StreamPhysicalWindowAggregateRule
+  val INSTANCE = new StreamPhysicalWindowAggregateRule(
+    Config.INSTANCE.withConversion(
+      classOf[FlinkLogicalAggregate],
+      FlinkConventions.LOGICAL,
+      FlinkConventions.STREAM_PHYSICAL,
+      "StreamPhysicalWindowAggregateRule"))
 
   private val WINDOW_START: String = "window_start"
   private val WINDOW_END: String = "window_end"

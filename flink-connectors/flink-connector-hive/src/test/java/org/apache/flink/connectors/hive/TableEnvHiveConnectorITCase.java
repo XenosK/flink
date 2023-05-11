@@ -19,10 +19,9 @@
 package org.apache.flink.connectors.hive;
 
 import org.apache.flink.table.HiveVersionTestUtil;
+import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.SqlDialect;
 import org.apache.flink.table.api.TableEnvironment;
-import org.apache.flink.table.api.TableSchema;
-import org.apache.flink.table.api.constraints.UniqueConstraint;
 import org.apache.flink.table.api.internal.TableImpl;
 import org.apache.flink.table.catalog.CatalogBaseTable;
 import org.apache.flink.table.catalog.ObjectPath;
@@ -104,12 +103,14 @@ public class TableEnvHiveConnectorITCase {
                             tableEnv.executeSql("select * from destp order by x").collect());
             assertThat(results.toString()).isEqualTo("[+I[1, 1], +I[2, 2]]");
             // static partitioned table
+            // The semantics of overwrite is to overwrite the original data, so the
+            // p=1 partition is overwritten with an empty partition.
             tableEnv.executeSql("insert overwrite table destp partition(p=1) select x from src")
                     .await();
             results =
                     CollectionUtil.iteratorToList(
                             tableEnv.executeSql("select * from destp order by x").collect());
-            assertThat(results.toString()).isEqualTo("[+I[1, 1], +I[2, 2]]");
+            assertThat(results.toString()).isEqualTo("[+I[2, 2]]");
         } finally {
             tableEnv.executeSql("drop database db1 cascade");
         }
@@ -330,14 +331,14 @@ public class TableEnvHiveConnectorITCase {
             tableEnv.executeSql(
                     "create table db1.tbl (x int,y bigint not null enable rely,z string not null enable norely)");
             CatalogBaseTable catalogTable = hiveCatalog.getTable(new ObjectPath("db1", "tbl"));
-            TableSchema tableSchema = catalogTable.getSchema();
-            assertThat(tableSchema.getFieldDataTypes()[0].getLogicalType().isNullable())
+            List<Schema.UnresolvedColumn> columns = catalogTable.getUnresolvedSchema().getColumns();
+            assertThat(HiveTestUtils.getType(columns.get(0)).getLogicalType().isNullable())
                     .as("By default columns should be nullable")
                     .isTrue();
-            assertThat(tableSchema.getFieldDataTypes()[1].getLogicalType().isNullable())
+            assertThat(HiveTestUtils.getType(columns.get(1)).getLogicalType().isNullable())
                     .as("NOT NULL columns should be reflected in table schema")
                     .isFalse();
-            assertThat(tableSchema.getFieldDataTypes()[2].getLogicalType().isNullable())
+            assertThat(HiveTestUtils.getType(columns.get(2)).getLogicalType().isNullable())
                     .as("NOT NULL NORELY columns should be considered nullable")
                     .isTrue();
         } finally {
@@ -358,24 +359,24 @@ public class TableEnvHiveConnectorITCase {
             tableEnv.executeSql(
                     "create table db1.tbl1 (x tinyint,y smallint,z int, primary key (x,z) disable novalidate rely)");
             CatalogBaseTable catalogTable = hiveCatalog.getTable(new ObjectPath("db1", "tbl1"));
-            TableSchema tableSchema = catalogTable.getSchema();
-            assertThat(tableSchema.getPrimaryKey()).isPresent();
-            UniqueConstraint pk = tableSchema.getPrimaryKey().get();
-            assertThat(pk.getColumns()).hasSize(2);
-            assertThat(pk.getColumns().containsAll(Arrays.asList("x", "z"))).isTrue();
+            Schema schema = catalogTable.getUnresolvedSchema();
+            assertThat(schema.getPrimaryKey()).isPresent();
+            Schema.UnresolvedPrimaryKey pk = schema.getPrimaryKey().get();
+            assertThat(pk.getColumnNames()).hasSize(2);
+            assertThat(pk.getColumnNames().containsAll(Arrays.asList("x", "z"))).isTrue();
 
             // test norely PK constraints
             tableEnv.executeSql(
                     "create table db1.tbl2 (x tinyint,y smallint, primary key (x) disable norely)");
             catalogTable = hiveCatalog.getTable(new ObjectPath("db1", "tbl2"));
-            tableSchema = catalogTable.getSchema();
-            assertThat(tableSchema.getPrimaryKey()).isNotPresent();
+            schema = catalogTable.getUnresolvedSchema();
+            assertThat(schema.getPrimaryKey()).isNotPresent();
 
             // test table w/o PK
             tableEnv.executeSql("create table db1.tbl3 (x tinyint)");
             catalogTable = hiveCatalog.getTable(new ObjectPath("db1", "tbl3"));
-            tableSchema = catalogTable.getSchema();
-            assertThat(tableSchema.getPrimaryKey()).isNotPresent();
+            schema = catalogTable.getUnresolvedSchema();
+            assertThat(schema.getPrimaryKey()).isNotPresent();
         } finally {
             tableEnv.executeSql("drop database db1 cascade");
         }

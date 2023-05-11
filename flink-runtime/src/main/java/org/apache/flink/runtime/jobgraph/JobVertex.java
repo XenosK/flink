@@ -36,7 +36,9 @@ import javax.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -72,14 +74,14 @@ public class JobVertex implements java.io.Serializable {
      */
     private final List<OperatorIDPair> operatorIDs;
 
-    /** List of produced data sets, one per writer. */
-    private final ArrayList<IntermediateDataSet> results = new ArrayList<>();
+    /** Produced data sets, one per writer. */
+    private final Map<IntermediateDataSetID, IntermediateDataSet> results = new LinkedHashMap<>();
 
     /** List of edges with incoming data. One per Reader. */
-    private final ArrayList<JobEdge> inputs = new ArrayList<>();
+    private final List<JobEdge> inputs = new ArrayList<>();
 
     /** The list of factories for operator coordinators. */
-    private final ArrayList<SerializedValue<OperatorCoordinator.Provider>> operatorCoordinators =
+    private final List<SerializedValue<OperatorCoordinator.Provider>> operatorCoordinators =
             new ArrayList<>();
 
     /** Number of subtasks to split this task into at runtime. */
@@ -147,11 +149,13 @@ public class JobVertex implements java.io.Serializable {
      */
     private final List<IntermediateDataSetID> intermediateDataSetIdsToConsume = new ArrayList<>();
 
-    /** Indicates whether this job vertex contains source operators. */
-    private boolean containsSourceOperators = false;
+    /**
+     * Indicates whether this job vertex supports multiple attempts of the same subtask executing at
+     * the same time.
+     */
+    private boolean supportsConcurrentExecutionAttempts = true;
 
-    /** Indicates whether this job vertex contains sink operators. */
-    private boolean containsSinkOperators = false;
+    private boolean parallelismConfigured = false;
 
     // --------------------------------------------------------------------------------------------
 
@@ -260,6 +264,15 @@ public class JobVertex implements java.io.Serializable {
         this.invokableClassName = invokable.getName();
     }
 
+    // This method can only be called once when jobGraph generated
+    public void setParallelismConfigured(boolean parallelismConfigured) {
+        this.parallelismConfigured = parallelismConfigured;
+    }
+
+    public boolean isParallelismConfigured() {
+        return parallelismConfigured;
+    }
+
     /**
      * Returns the name of the invokable class which represents the task of this vertex.
      *
@@ -308,8 +321,11 @@ public class JobVertex implements java.io.Serializable {
      * @param parallelism The parallelism for the task.
      */
     public void setParallelism(int parallelism) {
-        if (parallelism < 1) {
-            throw new IllegalArgumentException("The parallelism must be at least one.");
+        if (parallelism < 1 && parallelism != ExecutionConfig.PARALLELISM_DEFAULT) {
+            throw new IllegalArgumentException(
+                    "The parallelism must be at least one, or "
+                            + ExecutionConfig.PARALLELISM_DEFAULT
+                            + " (unset).");
         }
         this.parallelism = parallelism;
     }
@@ -327,7 +343,7 @@ public class JobVertex implements java.io.Serializable {
      * Sets the maximum parallelism for the task.
      *
      * @param maxParallelism The maximum parallelism to be set. must be between 1 and
-     *     Short.MAX_VALUE.
+     *     Short.MAX_VALUE + 1.
      */
     public void setMaxParallelism(int maxParallelism) {
         this.maxParallelism = maxParallelism;
@@ -371,7 +387,7 @@ public class JobVertex implements java.io.Serializable {
     }
 
     public List<IntermediateDataSet> getProducedDataSets() {
-        return this.results;
+        return new ArrayList<>(results.values());
     }
 
     public List<JobEdge> getInputs() {
@@ -478,30 +494,37 @@ public class JobVertex implements java.io.Serializable {
     }
 
     // --------------------------------------------------------------------------------------------
-    public IntermediateDataSet createAndAddResultDataSet(
+    public IntermediateDataSet getOrCreateResultDataSet(
             IntermediateDataSetID id, ResultPartitionType partitionType) {
-
-        IntermediateDataSet result = new IntermediateDataSet(id, partitionType, this);
-        this.results.add(result);
-        return result;
+        return this.results.computeIfAbsent(
+                id, key -> new IntermediateDataSet(id, partitionType, this));
     }
 
     public JobEdge connectNewDataSetAsInput(
             JobVertex input, DistributionPattern distPattern, ResultPartitionType partitionType) {
-        return connectNewDataSetAsInput(
-                input, distPattern, partitionType, new IntermediateDataSetID());
+        return connectNewDataSetAsInput(input, distPattern, partitionType, false);
     }
 
     public JobEdge connectNewDataSetAsInput(
             JobVertex input,
             DistributionPattern distPattern,
             ResultPartitionType partitionType,
-            IntermediateDataSetID intermediateDataSetId) {
+            boolean isBroadcast) {
+        return connectNewDataSetAsInput(
+                input, distPattern, partitionType, new IntermediateDataSetID(), isBroadcast);
+    }
+
+    public JobEdge connectNewDataSetAsInput(
+            JobVertex input,
+            DistributionPattern distPattern,
+            ResultPartitionType partitionType,
+            IntermediateDataSetID intermediateDataSetId,
+            boolean isBroadcast) {
 
         IntermediateDataSet dataSet =
-                input.createAndAddResultDataSet(intermediateDataSetId, partitionType);
+                input.getOrCreateResultDataSet(intermediateDataSetId, partitionType);
 
-        JobEdge edge = new JobEdge(dataSet, this, distPattern);
+        JobEdge edge = new JobEdge(dataSet, this, distPattern, isBroadcast);
         this.inputs.add(edge);
         dataSet.addConsumer(edge);
         return edge;
@@ -522,29 +545,16 @@ public class JobVertex implements java.io.Serializable {
     }
 
     public boolean hasNoConnectedInputs() {
-        for (JobEdge edge : inputs) {
-            if (!edge.isIdReference()) {
-                return false;
-            }
-        }
-
-        return true;
+        return inputs.isEmpty();
     }
 
-    public void markContainsSources() {
-        this.containsSourceOperators = true;
+    public void setSupportsConcurrentExecutionAttempts(
+            boolean supportsConcurrentExecutionAttempts) {
+        this.supportsConcurrentExecutionAttempts = supportsConcurrentExecutionAttempts;
     }
 
-    public boolean containsSources() {
-        return containsSourceOperators;
-    }
-
-    public void markContainsSinks() {
-        this.containsSinkOperators = true;
-    }
-
-    public boolean containsSinks() {
-        return containsSinkOperators;
+    public boolean isSupportsConcurrentExecutionAttempts() {
+        return supportsConcurrentExecutionAttempts;
     }
 
     // --------------------------------------------------------------------------------------------
@@ -553,19 +563,55 @@ public class JobVertex implements java.io.Serializable {
      * A hook that can be overwritten by sub classes to implement logic that is called by the master
      * when the job starts.
      *
-     * @param loader The class loader for user defined code.
+     * @param context Provides contextual information for the initialization
      * @throws Exception The method may throw exceptions which cause the job to fail immediately.
      */
-    public void initializeOnMaster(ClassLoader loader) throws Exception {}
+    public void initializeOnMaster(InitializeOnMasterContext context) throws Exception {}
 
     /**
      * A hook that can be overwritten by sub classes to implement logic that is called by the master
      * after the job completed.
      *
-     * @param loader The class loader for user defined code.
+     * @param context Provides contextual information for the initialization
      * @throws Exception The method may throw exceptions which cause the job to fail immediately.
      */
-    public void finalizeOnMaster(ClassLoader loader) throws Exception {}
+    public void finalizeOnMaster(FinalizeOnMasterContext context) throws Exception {}
+
+    public interface InitializeOnMasterContext {
+        /** The class loader for user defined code. */
+        ClassLoader getClassLoader();
+
+        /**
+         * The actual parallelism this vertex will be run with. In contrast, the {@link
+         * #getParallelism()} is the original parallelism set when creating the {@link JobGraph} and
+         * might be updated e.g. by the {@link
+         * org.apache.flink.runtime.scheduler.adaptive.AdaptiveScheduler}.
+         */
+        int getExecutionParallelism();
+    }
+
+    /** The context exposes some runtime infos for finalization. */
+    public interface FinalizeOnMasterContext {
+        /** The class loader for user defined code. */
+        ClassLoader getClassLoader();
+
+        /**
+         * The actual parallelism this vertex will be run with. In contrast, the {@link
+         * #getParallelism()} is the original parallelism set when creating the {@link JobGraph} and
+         * might be updated e.g. by the {@link
+         * org.apache.flink.runtime.scheduler.adaptive.AdaptiveScheduler}.
+         */
+        int getExecutionParallelism();
+
+        /**
+         * Get the finished attempt number of subtask.
+         *
+         * @param subtaskIndex the subtask index.
+         * @return the finished attempt.
+         * @throws IllegalArgumentException Thrown, if subtaskIndex is invalid.
+         */
+        int getFinishedAttempt(int subtaskIndex);
+    }
 
     // --------------------------------------------------------------------------------------------
 

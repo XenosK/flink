@@ -187,7 +187,7 @@ public class PlannerContext {
         }
 
         final SqlParser.Config newSqlParserConfig =
-                SqlParser.configBuilder(sqlParserConfig).setCaseSensitive(caseSensitive).build();
+                sqlParserConfig.withCaseSensitive(caseSensitive);
 
         final SchemaPlus finalRootSchema = getRootSchema(rootSchema.plus());
 
@@ -211,7 +211,11 @@ public class PlannerContext {
         final FlinkCalciteCatalogReader calciteCatalogReader = createCatalogReader(false);
 
         // Sets up the ViewExpander explicitly for FlinkRelBuilder.
-        final Context chain = Contexts.of(context, planner.createToRelContext());
+        final Context chain =
+                Contexts.of(
+                        context,
+                        planner.createToRelContext(),
+                        FlinkRelBuilder.FLINK_REL_BUILDER_CONFIG);
 
         return FlinkRelBuilder.of(chain, cluster, calciteCatalogReader);
     }
@@ -262,8 +266,9 @@ public class PlannerContext {
     private FlinkSqlConformance getSqlConformance() {
         SqlDialect sqlDialect = context.getTableConfig().getSqlDialect();
         switch (sqlDialect) {
+                // Actually, in Hive dialect, we won't use Calcite parser.
+                // So, we can just use Flink's default sql conformance as a placeholder
             case HIVE:
-                return FlinkSqlConformance.HIVE;
             case DEFAULT:
                 return FlinkSqlConformance.DEFAULT;
             default:
@@ -315,6 +320,6 @@ public class PlannerContext {
                         context.getCatalogManager().getDataTypeFactory(),
                         typeFactory,
                         context.getRexFactory()),
-                FlinkSqlOperatorTable.instance());
+                FlinkSqlOperatorTable.instance(context.isBatchMode()));
     }
 }

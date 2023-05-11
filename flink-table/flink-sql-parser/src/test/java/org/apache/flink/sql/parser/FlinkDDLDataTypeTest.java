@@ -547,12 +547,12 @@ class FlinkDDLDataTypeTest {
         private final SqlParser.Config parserConfig;
 
         TestFactory() {
-            this(DEFAULT_OPTIONS, MockCatalogReaderSimple::new, SqlValidatorUtil::newValidator);
+            this(DEFAULT_OPTIONS, MockCatalogReaderSimple::create, SqlValidatorUtil::newValidator);
         }
 
         TestFactory(
                 Map<String, Object> options,
-                SqlTestFactory.MockCatalogReaderFactory catalogReaderFactory,
+                SqlTestFactory.CatalogReaderFactory catalogReaderFactory,
                 SqlTestFactory.ValidatorFactory validatorFactory) {
             this.options = options;
             this.validatorFactory = validatorFactory;
@@ -560,7 +560,7 @@ class FlinkDDLDataTypeTest {
                     createOperatorTable((SqlOperatorTable) options.get("operatorTable"));
             this.typeFactory = createTypeFactory((SqlConformance) options.get("conformance"));
             Boolean caseSensitive = (Boolean) options.get("caseSensitive");
-            this.catalogReader = catalogReaderFactory.create(typeFactory, caseSensitive).init();
+            this.catalogReader = catalogReaderFactory.create(typeFactory, caseSensitive);
             this.parserConfig = createParserConfig(options);
         }
 
@@ -589,7 +589,7 @@ class FlinkDDLDataTypeTest {
                     catalogReader,
                     typeFactory,
                     SqlValidator.Config.DEFAULT
-                            .withSqlConformance(conformance)
+                            .withConformance(conformance)
                             .withTypeCoercionEnabled(enableTypeCoercion));
         }
 
@@ -600,14 +600,13 @@ class FlinkDDLDataTypeTest {
         }
 
         private static SqlParser.Config createParserConfig(Map<String, Object> options) {
-            return SqlParser.configBuilder()
-                    .setQuoting((Quoting) options.get("quoting"))
-                    .setUnquotedCasing((Casing) options.get("unquotedCasing"))
-                    .setQuotedCasing((Casing) options.get("quotedCasing"))
-                    .setConformance((SqlConformance) options.get("conformance"))
-                    .setCaseSensitive((boolean) options.get("caseSensitive"))
-                    .setParserFactory((SqlParserImplFactory) options.get("parserFactory"))
-                    .build();
+            return SqlParser.config()
+                    .withQuoting((Quoting) options.get("quoting"))
+                    .withUnquotedCasing((Casing) options.get("unquotedCasing"))
+                    .withQuotedCasing((Casing) options.get("quotedCasing"))
+                    .withConformance((SqlConformance) options.get("conformance"))
+                    .withCaseSensitive((boolean) options.get("caseSensitive"))
+                    .withParserFactory((SqlParserImplFactory) options.get("parserFactory"));
         }
 
         private static TestRelDataTypeFactory createTypeFactory(SqlConformance conformance) {

@@ -63,6 +63,7 @@ public class ResourceManagerOptions {
                                     + " Its not possible to use this configuration key to define port ranges.");
 
     @Documentation.Section(Documentation.Sections.EXPERT_SCHEDULING)
+    @Documentation.OverrideDefault("infinite")
     public static final ConfigOption<Integer> MAX_SLOT_NUM =
             ConfigOptions.key("slotmanager.number-of-slots.max")
                     .intType()
@@ -101,6 +102,10 @@ public class ResourceManagerOptions {
      * The number of redundant task managers. Redundant task managers are extra task managers
      * started by Flink, in order to speed up job recovery in case of failures due to task manager
      * lost. Note that this feature is available only to the active deployments (native K8s, Yarn).
+     * For fine-grained resource requirement, Redundant resources will be reserved, but it is
+     * possible that we have many small pieces of free resources form multiple TMs, which added up
+     * larger than the desired redundant resources, but each piece is too small to match the
+     * resource requirement of tasks from the failed worker.
      */
     public static final ConfigOption<Integer> REDUNDANT_TASK_MANAGER_NUM =
             ConfigOptions.key("slotmanager.redundant-taskmanager-num")
@@ -109,7 +114,10 @@ public class ResourceManagerOptions {
                     .withDescription(
                             "The number of redundant task managers. Redundant task managers are extra task managers "
                                     + "started by Flink, in order to speed up job recovery in case of failures due to task manager lost. "
-                                    + "Note that this feature is available only to the active deployments (native K8s, Yarn).");
+                                    + "Note that this feature is available only to the active deployments (native K8s, Yarn)."
+                                    + "For fine-grained resource requirement, Redundant resources will be reserved, but it is possible that "
+                                    + "we have many small pieces of free resources form multiple TMs, which added up larger than the desired "
+                                    + "redundant resources, but each piece is too small to match the resource requirement of tasks from the failed worker.");
 
     /**
      * The maximum number of start worker failures (Native Kubernetes / Yarn) per minute before
@@ -149,6 +157,14 @@ public class ResourceManagerOptions {
                     .durationType()
                     .defaultValue(Duration.ofMillis(50))
                     .withDescription("The delay of the resource requirements check.");
+
+    @Documentation.ExcludeFromDocumentation(
+            "This is an expert option, that we do not want to expose in the documentation")
+    public static final ConfigOption<Duration> DECLARE_NEEDED_RESOURCE_DELAY =
+            ConfigOptions.key("slotmanager.declare-needed-resource.delay")
+                    .durationType()
+                    .defaultValue(Duration.ofMillis(50))
+                    .withDescription("The delay of the declare needed resources.");
 
     /**
      * The timeout for a slot request to be discarded, in milliseconds.
@@ -260,6 +276,17 @@ public class ResourceManagerOptions {
                                     + "fallback to '"
                                     + TaskManagerOptions.REGISTRATION_TIMEOUT.key()
                                     + "'.");
+
+    /** Timeout for ResourceManager to recover all the previous attempts workers. */
+    public static final ConfigOption<Duration> RESOURCE_MANAGER_PREVIOUS_WORKER_RECOVERY_TIMEOUT =
+            ConfigOptions.key("resourcemanager.previous-worker.recovery.timeout")
+                    .durationType()
+                    .defaultValue(Duration.ofSeconds(0))
+                    .withDescription(
+                            "Timeout for resource manager to recover all the previous attempts workers. If exceeded,"
+                                    + " resource manager will handle new resource requests by requesting new workers."
+                                    + " If you would like to reuse the previous workers as much as possible, you should"
+                                    + " configure a longer timeout time to wait for previous workers to register.");
 
     // ---------------------------------------------------------------------------------------------
 

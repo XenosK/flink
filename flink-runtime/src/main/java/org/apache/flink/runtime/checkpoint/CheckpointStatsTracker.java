@@ -22,7 +22,7 @@ import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.Metric;
 import org.apache.flink.metrics.MetricGroup;
-import org.apache.flink.runtime.executiongraph.ExecutionVertex;
+import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
 import javax.annotation.Nullable;
@@ -258,16 +258,16 @@ public class CheckpointStatsTracker {
     }
 
     public void reportIncompleteStats(
-            long checkpointId, ExecutionVertex vertex, CheckpointMetrics metrics) {
+            long checkpointId, ExecutionAttemptID attemptId, CheckpointMetrics metrics) {
         statsReadWriteLock.lock();
         try {
             AbstractCheckpointStats stats = history.getCheckpointById(checkpointId);
             if (stats instanceof PendingCheckpointStats) {
                 ((PendingCheckpointStats) stats)
                         .reportSubtaskStats(
-                                vertex.getJobvertexId(),
+                                attemptId.getJobVertexId(),
                                 new SubtaskStateStats(
-                                        vertex.getParallelSubtaskIndex(),
+                                        attemptId.getSubtaskIndex(),
                                         System.currentTimeMillis(),
                                         metrics.getBytesPersistedOfThisCheckpoint(),
                                         metrics.getTotalBytesPersisted(),
@@ -327,6 +327,9 @@ public class CheckpointStatsTracker {
     static final String LATEST_COMPLETED_CHECKPOINT_EXTERNAL_PATH_METRIC =
             "lastCheckpointExternalPath";
 
+    @VisibleForTesting
+    static final String LATEST_COMPLETED_CHECKPOINT_ID_METRIC = "lastCompletedCheckpointId";
+
     /**
      * Register the exposed metrics.
      *
@@ -359,6 +362,8 @@ public class CheckpointStatsTracker {
         metricGroup.gauge(
                 LATEST_COMPLETED_CHECKPOINT_EXTERNAL_PATH_METRIC,
                 new LatestCompletedCheckpointExternalPathGauge());
+        metricGroup.gauge(
+                LATEST_COMPLETED_CHECKPOINT_ID_METRIC, new LatestCompletedCheckpointIdGauge());
     }
 
     private class CheckpointsCounter implements Gauge<Long> {
@@ -469,6 +474,18 @@ public class CheckpointStatsTracker {
                 return completed.getExternalPath();
             } else {
                 return "n/a";
+            }
+        }
+    }
+
+    private class LatestCompletedCheckpointIdGauge implements Gauge<Long> {
+        @Override
+        public Long getValue() {
+            CompletedCheckpointStats completed = latestCompletedCheckpoint;
+            if (completed != null) {
+                return completed.getCheckpointId();
+            } else {
+                return -1L;
             }
         }
     }

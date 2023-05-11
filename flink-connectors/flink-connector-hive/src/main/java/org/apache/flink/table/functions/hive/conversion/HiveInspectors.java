@@ -36,6 +36,8 @@ import org.apache.flink.types.Row;
 
 import org.apache.hadoop.hive.common.type.HiveChar;
 import org.apache.hadoop.hive.common.type.HiveDecimal;
+import org.apache.hadoop.hive.common.type.HiveIntervalDayTime;
+import org.apache.hadoop.hive.common.type.HiveIntervalYearMonth;
 import org.apache.hadoop.hive.common.type.HiveVarchar;
 import org.apache.hadoop.hive.serde2.io.ByteWritable;
 import org.apache.hadoop.hive.serde2.io.DoubleWritable;
@@ -59,6 +61,8 @@ import org.apache.hadoop.hive.serde2.objectinspector.primitive.DoubleObjectInspe
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.FloatObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.HiveCharObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.HiveDecimalObjectInspector;
+import org.apache.hadoop.hive.serde2.objectinspector.primitive.HiveIntervalDayTimeObjectInspector;
+import org.apache.hadoop.hive.serde2.objectinspector.primitive.HiveIntervalYearMonthObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.HiveVarcharObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.IntObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.LongObjectInspector;
@@ -81,6 +85,7 @@ import org.apache.hadoop.hive.serde2.objectinspector.primitive.WritableConstantL
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.WritableConstantShortObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.WritableConstantStringObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.WritableConstantTimestampObjectInspector;
+import org.apache.hadoop.hive.serde2.objectinspector.primitive.WritableVoidObjectInspector;
 import org.apache.hadoop.hive.serde2.typeinfo.CharTypeInfo;
 import org.apache.hadoop.hive.serde2.typeinfo.DecimalTypeInfo;
 import org.apache.hadoop.hive.serde2.typeinfo.ListTypeInfo;
@@ -102,6 +107,8 @@ import javax.annotation.Nullable;
 import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.math.BigDecimal;
+import java.time.Duration;
+import java.time.Period;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -216,6 +223,28 @@ public class HiveInspectors {
                                                 (String) o, ((VarCharType) dataType).getLength());
             } else if (inspector instanceof HiveDecimalObjectInspector) {
                 conversion = o -> o == null ? null : HiveDecimal.create((BigDecimal) o);
+            } else if (inspector instanceof HiveIntervalYearMonthObjectInspector) {
+                conversion =
+                        o -> {
+                            if (o == null) {
+                                return null;
+                            } else {
+                                Period period = (Period) o;
+                                return new HiveIntervalYearMonth(
+                                        period.getYears(), period.getMonths());
+                            }
+                        };
+            } else if (inspector instanceof HiveIntervalDayTimeObjectInspector) {
+                conversion =
+                        o -> {
+                            if (o == null) {
+                                return null;
+                            } else {
+                                Duration duration = (Duration) o;
+                                return new HiveIntervalDayTime(
+                                        duration.getSeconds(), duration.getNano());
+                            }
+                        };
             } else {
                 throw new FlinkHiveUDFException(
                         "Unsupported primitive object inspector " + inspector.getClass().getName());
@@ -339,16 +368,25 @@ public class HiveInspectors {
                 return hiveShim.toFlinkTimestamp(poi.getPrimitiveJavaObject(data));
             } else if (inspector instanceof HiveCharObjectInspector) {
                 HiveCharObjectInspector oi = (HiveCharObjectInspector) inspector;
-
                 return oi.getPrimitiveJavaObject(data).getValue();
             } else if (inspector instanceof HiveVarcharObjectInspector) {
                 HiveVarcharObjectInspector oi = (HiveVarcharObjectInspector) inspector;
-
                 return oi.getPrimitiveJavaObject(data).getValue();
             } else if (inspector instanceof HiveDecimalObjectInspector) {
                 HiveDecimalObjectInspector oi = (HiveDecimalObjectInspector) inspector;
-
                 return oi.getPrimitiveJavaObject(data).bigDecimalValue();
+            } else if (inspector instanceof HiveIntervalYearMonthObjectInspector) {
+                HiveIntervalYearMonthObjectInspector oi =
+                        (HiveIntervalYearMonthObjectInspector) inspector;
+                HiveIntervalYearMonth hiveIntervalYearMonth = oi.getPrimitiveJavaObject(data);
+                return Period.of(
+                        hiveIntervalYearMonth.getYears(), hiveIntervalYearMonth.getMonths(), 0);
+            } else if (inspector instanceof HiveIntervalDayTimeObjectInspector) {
+                HiveIntervalDayTimeObjectInspector oi =
+                        (HiveIntervalDayTimeObjectInspector) inspector;
+                HiveIntervalDayTime hiveIntervalDayTime = oi.getPrimitiveJavaObject(data);
+                return Duration.ofSeconds(
+                        hiveIntervalDayTime.getTotalSeconds(), hiveIntervalDayTime.getNanos());
             }
         }
 
@@ -416,7 +454,6 @@ public class HiveInspectors {
             }
             return row;
         }
-
         throw new FlinkHiveUDFException(
                 String.format("Unwrap does not support ObjectInspector '%s' yet", inspector));
     }
@@ -513,9 +550,18 @@ public class HiveInspectors {
                 className = WritableConstantBinaryObjectInspector.class.getName();
                 return HiveReflectionUtils.createConstantObjectInspector(
                         className, BytesWritable.class, value);
-            case UNKNOWN:
             case VOID:
-                // If type is null, we use the Constant String to replace
+                try {
+                    Constructor<WritableVoidObjectInspector> constructor =
+                            WritableVoidObjectInspector.class.getDeclaredConstructor();
+                    constructor.setAccessible(true);
+                    return constructor.newInstance();
+                } catch (Exception e) {
+                    throw new FlinkHiveUDFException(
+                            "Failed to create writable constant object inspector", e);
+                }
+            case UNKNOWN:
+                // If type is unknown, we use the Constant String to replace
                 className = WritableConstantStringObjectInspector.class.getName();
                 return HiveReflectionUtils.createConstantObjectInspector(
                         className, Text.class, value == null ? null : value.toString());

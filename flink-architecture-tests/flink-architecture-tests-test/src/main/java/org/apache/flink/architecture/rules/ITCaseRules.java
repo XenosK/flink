@@ -19,6 +19,8 @@
 package org.apache.flink.architecture.rules;
 
 import org.apache.flink.architecture.common.Predicates;
+import org.apache.flink.connector.testframe.environment.MiniClusterTestEnvironment;
+import org.apache.flink.connector.testframe.junit.annotations.TestEnv;
 import org.apache.flink.runtime.testutils.InternalMiniClusterExtension;
 import org.apache.flink.test.junit5.MiniClusterExtension;
 import org.apache.flink.test.util.AbstractTestBase;
@@ -40,6 +42,8 @@ import static com.tngtech.archunit.core.domain.JavaModifier.ABSTRACT;
 import static com.tngtech.archunit.library.freeze.FreezingArchRule.freeze;
 import static org.apache.flink.architecture.common.Conditions.fulfill;
 import static org.apache.flink.architecture.common.GivenJavaClasses.javaClassesThat;
+import static org.apache.flink.architecture.common.JavaFieldPredicates.annotatedWith;
+import static org.apache.flink.architecture.common.Predicates.areFieldOfType;
 import static org.apache.flink.architecture.common.Predicates.arePublicFinalOfTypeWithAnnotation;
 import static org.apache.flink.architecture.common.Predicates.arePublicStaticFinalOfTypeWithAnnotation;
 import static org.apache.flink.architecture.common.Predicates.areStaticFinalOfTypeWithAnnotation;
@@ -57,6 +61,9 @@ public class ITCaseRules {
                                     .doNotHaveModifier(ABSTRACT)
                                     .should()
                                     .haveSimpleNameEndingWith("ITCase"))
+                    // FALSE by default since 0.23.0 however not every module has inheritors of
+                    // AbstractTestBase
+                    .allowEmptyShould(true)
                     .as(
                             "Tests inheriting from AbstractTestBase should have name ending with ITCase");
 
@@ -128,6 +135,8 @@ public class ITCaseRules {
                                                                     miniClusterWithClientResourceClassRule())
                                                             .or(
                                                                     miniClusterWithClientResourceRule()))))
+                    // FALSE by default since 0.23.0 however not every module has *ITCase tests
+                    .allowEmptyShould(true)
                     .as("ITCASE tests should use a MiniCluster resource or extension");
 
     private static DescribedPredicate<JavaClass> miniClusterWithClientResourceClassRule() {
@@ -164,8 +173,15 @@ public class ITCaseRules {
                         .and(
                                 containAnyFieldsInClassHierarchyThat(
                                         areStaticFinalOfTypeWithAnnotation(
-                                                MiniClusterExtension.class,
-                                                RegisterExtension.class))),
+                                                        MiniClusterExtension.class,
+                                                        RegisterExtension.class)
+                                                .or(
+                                                        areFieldOfType(
+                                                                        MiniClusterTestEnvironment
+                                                                                .class)
+                                                                .and(
+                                                                        annotatedWith(
+                                                                                TestEnv.class))))),
                 inFlinkRuntimePackages()
                         .and(
                                 isAnnotatedWithExtendWithUsingExtension(

@@ -262,7 +262,7 @@ public class DefaultExecutionTopology implements SchedulingTopology {
             List<DefaultResultPartition> producedPartitions =
                     generateProducedSchedulingResultPartition(
                             vertex.getProducedPartitions(),
-                            edgeManager::getConsumerVertexGroupForPartition);
+                            edgeManager::getConsumerVertexGroupsForPartition);
 
             producedPartitions.forEach(
                     partition -> resultPartitionsById.put(partition.getId(), partition));
@@ -285,8 +285,8 @@ public class DefaultExecutionTopology implements SchedulingTopology {
     private static List<DefaultResultPartition> generateProducedSchedulingResultPartition(
             Map<IntermediateResultPartitionID, IntermediateResultPartition>
                     producedIntermediatePartitions,
-            Function<IntermediateResultPartitionID, ConsumerVertexGroup>
-                    partitionConsumerVertexGroupRetriever) {
+            Function<IntermediateResultPartitionID, List<ConsumerVertexGroup>>
+                    partitionConsumerVertexGroupsRetriever) {
 
         List<DefaultResultPartition> producedSchedulingPartitions =
                 new ArrayList<>(producedIntermediatePartitions.size());
@@ -301,12 +301,13 @@ public class DefaultExecutionTopology implements SchedulingTopology {
                                                 irp.getIntermediateResult().getId(),
                                                 irp.getResultType(),
                                                 () ->
-                                                        irp.isConsumable()
-                                                                ? ResultPartitionState.CONSUMABLE
+                                                        irp.hasDataAllProduced()
+                                                                ? ResultPartitionState
+                                                                        .ALL_DATA_PRODUCED
                                                                 : ResultPartitionState.CREATED,
                                                 () ->
-                                                        partitionConsumerVertexGroupRetriever.apply(
-                                                                irp.getPartitionId()),
+                                                        partitionConsumerVertexGroupsRetriever
+                                                                .apply(irp.getPartitionId()),
                                                 irp::getConsumedPartitionGroups)));
 
         return producedSchedulingPartitions;

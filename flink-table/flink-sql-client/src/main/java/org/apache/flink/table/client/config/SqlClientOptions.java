@@ -21,6 +21,8 @@ package org.apache.flink.table.client.config;
 import org.apache.flink.annotation.docs.Documentation;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
+import org.apache.flink.table.api.config.TableConfigOptions;
+import org.apache.flink.table.client.cli.parser.SyntaxHighlightStyle;
 
 /** Options used in sql client. */
 public class SqlClientOptions {
@@ -53,14 +55,26 @@ public class SqlClientOptions {
                             "Determine whether to output the verbose output to the console. If set the option true, it will print the exception stack. Otherwise, it only output the cause.");
 
     // Display options
-
-    @Documentation.TableOption(execMode = Documentation.ExecMode.STREAMING)
+    /**
+     * Deprecated. Please use {@link TableConfigOptions#DISPLAY_MAX_COLUMN_WIDTH} instead. Please
+     * refer to FLINK-30862 for the reason that no @Deprecated has been used
+     */
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH_STREAMING)
     public static final ConfigOption<Integer> DISPLAY_MAX_COLUMN_WIDTH =
             ConfigOptions.key("sql-client.display.max-column-width")
                     .intType()
                     .defaultValue(30)
+                    .withFallbackKeys(TableConfigOptions.DISPLAY_MAX_COLUMN_WIDTH.key())
                     .withDescription(
-                            "When printing the query results, this parameter determines the number of characters shown on screen before truncating."
-                                    + "This only applies to columns with variable-length types (e.g. STRING) in streaming mode."
-                                    + "Fixed-length types and all types in batch mode are printed using a deterministic column width");
+                            "Deprecated, please use table.display.max-column-width instead. When printing the query results, this parameter determines the number of characters shown on screen before truncating. "
+                                    + "This only applies to columns with variable-length types (e.g. STRING) in streaming mode. "
+                                    + "Fixed-length types and all types in batch mode are printed using a deterministic column width.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH_STREAMING)
+    public static final ConfigOption<String> DISPLAY_DEFAULT_COLOR_SCHEMA =
+            ConfigOptions.key("sql-client.display.color-schema")
+                    .stringType()
+                    .defaultValue(SyntaxHighlightStyle.BuiltInStyle.DEFAULT.name())
+                    .withDescription(
+                            "SQL highlight color schema to be used at SQL client. Possible values: 'default', 'dark', 'light', 'chester', 'vs2010', 'solarized', 'obsidian', 'geshi'");
 }

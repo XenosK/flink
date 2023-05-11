@@ -15,10 +15,10 @@
 #  See the License for the specific language governing permissions and
 # limitations under the License.
 ################################################################################
-
 from enum import Enum
-
 from typing import List
+
+from pyflink.java_gateway import get_gateway
 
 __all__ = ['Row', 'RowKind']
 
@@ -38,6 +38,10 @@ class RowKind(Enum):
             return '+U'
         else:
             return '-D'
+
+    def to_j_row_kind(self):
+        JRowKind = get_gateway().jvm.org.apache.flink.types.RowKind
+        return getattr(JRowKind, self.name)
 
 
 def _create_row(fields, values, row_kind: RowKind = None):
@@ -247,7 +251,7 @@ class Row(object):
             return "Row(%s)" % ", ".join("%s=%r" % (k, v)
                                          for k, v in zip(self._fields, tuple(self)))
         else:
-            return "<Row(%s)>" % ", ".join("%r" % field for field in self)
+            return "<Row(%s)>" % ", ".join(repr(field) for field in self)
 
     def __eq__(self, other):
         if not isinstance(other, Row):

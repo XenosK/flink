@@ -29,7 +29,6 @@ import org.slf4j.LoggerFactory;
 import java.util.Collection;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import java.util.stream.Collectors;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -45,6 +44,10 @@ public class PhysicalSlotProviderImpl implements PhysicalSlotProvider {
             SlotSelectionStrategy slotSelectionStrategy, SlotPool slotPool) {
         this.slotSelectionStrategy = checkNotNull(slotSelectionStrategy);
         this.slotPool = checkNotNull(slotPool);
+    }
+
+    @Override
+    public void disableBatchSlotRequestTimeoutCheck() {
         slotPool.disableBatchSlotRequestTimeoutCheck();
     }
 
@@ -82,10 +85,7 @@ public class PhysicalSlotProviderImpl implements PhysicalSlotProvider {
 
     private Optional<PhysicalSlot> tryAllocateFromAvailable(
             SlotRequestId slotRequestId, SlotProfile slotProfile) {
-        Collection<SlotSelectionStrategy.SlotInfoAndResources> slotInfoList =
-                slotPool.getAvailableSlotsInformation().stream()
-                        .map(SlotSelectionStrategy.SlotInfoAndResources::fromSingleSlot)
-                        .collect(Collectors.toList());
+        Collection<SlotInfoWithUtilization> slotInfoList = slotPool.getAvailableSlotsInformation();
 
         Optional<SlotSelectionStrategy.SlotInfoAndLocality> selectedAvailableSlot =
                 slotSelectionStrategy.selectBestSlotForProfile(slotInfoList, slotProfile);

@@ -35,6 +35,7 @@ import org.apache.flink.runtime.metrics.groups.ReporterScopedSettings;
 import org.apache.flink.runtime.metrics.scope.ScopeFormats;
 import org.apache.flink.runtime.rpc.RpcService;
 import org.apache.flink.runtime.webmonitor.retriever.MetricQueryServiceGateway;
+import org.apache.flink.util.AutoCloseableAsync;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.ExecutorUtils;
 import org.apache.flink.util.FlinkException;
@@ -67,13 +68,14 @@ import java.util.stream.Collectors;
  * A MetricRegistry keeps track of all registered {@link Metric Metrics}. It serves as the
  * connection between {@link MetricGroup MetricGroups} and {@link MetricReporter MetricReporters}.
  */
-public class MetricRegistryImpl implements MetricRegistry {
+public class MetricRegistryImpl implements MetricRegistry, AutoCloseableAsync {
     private static final Logger LOG = LoggerFactory.getLogger(MetricRegistryImpl.class);
 
     private final Object lock = new Object();
 
     private final List<ReporterAndSettings> reporters;
-    private final ScheduledExecutorService executor;
+    private final ScheduledExecutorService reporterScheduledExecutor;
+    private final ScheduledExecutorService viewUpdaterScheduledExecutor;
 
     private final ScopeFormats scopeFormats;
     private final char globalDelimiter;
@@ -101,7 +103,9 @@ public class MetricRegistryImpl implements MetricRegistry {
                 config,
                 reporterConfigurations,
                 Executors.newSingleThreadScheduledExecutor(
-                        new ExecutorThreadFactory("Flink-MetricRegistry")));
+                        new ExecutorThreadFactory("Flink-Metric-Reporter")),
+                Executors.newSingleThreadScheduledExecutor(
+                        new ExecutorThreadFactory("Flink-Metric-View-Updater")));
     }
 
     @VisibleForTesting
@@ -109,6 +113,14 @@ public class MetricRegistryImpl implements MetricRegistry {
             MetricRegistryConfiguration config,
             Collection<ReporterSetup> reporterConfigurations,
             ScheduledExecutorService scheduledExecutor) {
+        this(config, reporterConfigurations, scheduledExecutor, scheduledExecutor);
+    }
+
+    MetricRegistryImpl(
+            MetricRegistryConfiguration config,
+            Collection<ReporterSetup> reporterConfigurations,
+            ScheduledExecutorService reporterScheduledExecutor,
+            ScheduledExecutorService viewUpdaterScheduledExecutor) {
         this.maximumFramesize = config.getQueryServiceMessageSizeLimit();
         this.scopeFormats = config.getScopeFormats();
         this.globalDelimiter = config.getDelimiter();
@@ -118,7 +130,8 @@ public class MetricRegistryImpl implements MetricRegistry {
         // second, instantiate any custom configured reporters
         this.reporters = new ArrayList<>(4);
 
-        this.executor = scheduledExecutor;
+        this.reporterScheduledExecutor = reporterScheduledExecutor;
+        this.viewUpdaterScheduledExecutor = viewUpdaterScheduledExecutor;
 
         this.queryService = null;
         this.metricQueryServiceRpcService = null;
@@ -144,7 +157,7 @@ public class MetricRegistryImpl implements MetricRegistry {
                                 namedReporter,
                                 className);
 
-                        executor.scheduleWithFixedDelay(
+                        reporterScheduledExecutor.scheduleWithFixedDelay(
                                 new MetricRegistryImpl.ReporterTask((Scheduled) reporterInstance),
                                 period.toMillis(),
                                 period.toMillis(),
@@ -312,7 +325,8 @@ public class MetricRegistryImpl implements MetricRegistry {
      *
      * @return Future which is completed once the {@link MetricRegistryImpl} is shut down.
      */
-    public CompletableFuture<Void> shutdown() {
+    @Override
+    public CompletableFuture<Void> closeAsync() {
         synchronized (lock) {
             if (isShutdown) {
                 return terminationFuture;
@@ -323,7 +337,7 @@ public class MetricRegistryImpl implements MetricRegistry {
 
                 if (metricQueryServiceRpcService != null) {
                     final CompletableFuture<Void> metricQueryServiceRpcServiceTerminationFuture =
-                            metricQueryServiceRpcService.stopService();
+                            metricQueryServiceRpcService.closeAsync();
                     terminationFutures.add(metricQueryServiceRpcServiceTerminationFuture);
                 }
 
@@ -345,11 +359,20 @@ public class MetricRegistryImpl implements MetricRegistry {
                                             throwable)));
                 }
 
-                final CompletableFuture<Void> executorShutdownFuture =
+                final CompletableFuture<Void> reporterExecutorShutdownFuture =
                         ExecutorUtils.nonBlockingShutdown(
-                                gracePeriod.toMilliseconds(), TimeUnit.MILLISECONDS, executor);
+                                gracePeriod.toMilliseconds(),
+                                TimeUnit.MILLISECONDS,
+                                reporterScheduledExecutor);
+                terminationFutures.add(reporterExecutorShutdownFuture);
 
-                terminationFutures.add(executorShutdownFuture);
+                final CompletableFuture<Void> viewUpdaterExecutorShutdownFuture =
+                        ExecutorUtils.nonBlockingShutdown(
+                                gracePeriod.toMilliseconds(),
+                                TimeUnit.MILLISECONDS,
+                                viewUpdaterScheduledExecutor);
+
+                terminationFutures.add(viewUpdaterExecutorShutdownFuture);
 
                 FutureUtils.completeAll(terminationFutures)
                         .whenComplete(
@@ -401,7 +424,7 @@ public class MetricRegistryImpl implements MetricRegistry {
                 try {
                     if (metric instanceof View) {
                         if (viewUpdater == null) {
-                            viewUpdater = new ViewUpdater(executor);
+                            viewUpdater = new ViewUpdater(viewUpdaterScheduledExecutor);
                         }
                         viewUpdater.notifyOfAddedView((View) metric);
                     }

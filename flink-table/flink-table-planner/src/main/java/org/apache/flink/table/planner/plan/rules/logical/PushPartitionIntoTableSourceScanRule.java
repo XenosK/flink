@@ -100,7 +100,7 @@ public class PushPartitionIntoTableSourceScanRule extends RelOptRule {
         if (!(dynamicTableSource instanceof SupportsPartitionPushDown)) {
             return false;
         }
-        CatalogTable catalogTable = tableSourceTable.contextResolvedTable().getTable();
+        CatalogTable catalogTable = tableSourceTable.contextResolvedTable().getResolvedTable();
         if (!catalogTable.isPartitioned() || catalogTable.getPartitionKeys().isEmpty()) {
             return false;
         }
@@ -185,7 +185,7 @@ public class PushPartitionIntoTableSourceScanRule extends RelOptRule {
         TableSourceTable newTableSourceTable =
                 tableSourceTable.copy(
                         dynamicTableSource,
-                        // the statistics will be updated in FlinkCollectStatisticsProgram
+                        // The statistics will be updated in FlinkRecomputeStatisticsProgram.
                         tableSourceTable.getStatistic(),
                         new SourceAbilitySpec[] {partitionPushDownSpec});
         LogicalTableScan newScan =
