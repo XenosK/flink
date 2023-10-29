@@ -27,6 +27,18 @@
             <td>Time we wait for the timers in milliseconds to finish all pending timer threads when the stream task is cancelled.</td>
         </tr>
         <tr>
+            <td><h5>taskmanager.bind-host</h5></td>
+            <td style="word-wrap: break-word;">(none)</td>
+            <td>String</td>
+            <td>The local address of the network interface that the task manager binds to. If not configured, '0.0.0.0' will be used.</td>
+        </tr>
+        <tr>
+            <td><h5>taskmanager.data.bind-port</h5></td>
+            <td style="word-wrap: break-word;">(none)</td>
+            <td>String</td>
+            <td>The task manager's bind port used for data exchange operations. Also accepts a list of ports (“50100,50101”), ranges (“50100-50200”) or a combination of both. If not configured, 'taskmanager.data.port' will be used.</td>
+        </tr>
+        <tr>
             <td><h5>taskmanager.data.port</h5></td>
             <td style="word-wrap: break-word;">0</td>
             <td>Integer</td>
@@ -100,6 +112,12 @@
             <td>The TaskManager's ResourceID. If not configured, the ResourceID will be generated with the "RpcAddress:RpcPort" and a 6-character random string. Notice that this option is not valid in Yarn and Native Kubernetes mode.</td>
         </tr>
         <tr>
+            <td><h5>taskmanager.rpc.bind-port</h5></td>
+            <td style="word-wrap: break-word;">(none)</td>
+            <td>Integer</td>
+            <td>The local RPC port that the TaskManager binds to. If not configured, the external port (configured by 'taskmanager.rpc.port') will be used.</td>
+        </tr>
+        <tr>
             <td><h5>taskmanager.rpc.port</h5></td>
             <td style="word-wrap: break-word;">"0"</td>
             <td>String</td>
@@ -109,7 +127,7 @@
             <td><h5>taskmanager.slot.timeout</h5></td>
             <td style="word-wrap: break-word;">10 s</td>
             <td>Duration</td>
-            <td>Timeout used for identifying inactive slots. The TaskManager will free the slot if it does not become active within the given amount of time. Inactive slots can be caused by an out-dated slot request. If no value is configured, then it will fall back to <code class="highlighter-rouge">akka.ask.timeout</code>.</td>
+            <td>Timeout used for identifying inactive slots. The TaskManager will free the slot if it does not become active within the given amount of time. Inactive slots can be caused by an out-dated slot request. If no value is configured, then it will fall back to <code class="highlighter-rouge">pekko.ask.timeout</code>.</td>
         </tr>
     </tbody>
 </table>

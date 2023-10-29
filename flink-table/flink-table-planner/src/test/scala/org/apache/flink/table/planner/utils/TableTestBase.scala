@@ -23,6 +23,7 @@ import org.apache.flink.api.java.typeutils.{PojoTypeInfo, RowTypeInfo, TupleType
 import org.apache.flink.api.scala.typeutils.CaseClassTypeInfo
 import org.apache.flink.configuration.BatchExecutionOptions
 import org.apache.flink.core.testutils.FlinkMatchers.containsMessage
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonParseException
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode
 import org.apache.flink.streaming.api.{environment, TimeCharacteristic}
 import org.apache.flink.streaming.api.datastream.DataStream
@@ -33,7 +34,7 @@ import org.apache.flink.table.api.bridge.java.{StreamTableEnvironment => JavaStr
 import org.apache.flink.table.api.bridge.scala.{StreamTableEnvironment => ScalaStreamTableEnv}
 import org.apache.flink.table.api.config.ExecutionConfigOptions
 import org.apache.flink.table.api.internal.{StatementSetImpl, TableEnvironmentImpl, TableEnvironmentInternal, TableImpl}
-import org.apache.flink.table.catalog.{CatalogManager, FunctionCatalog, GenericInMemoryCatalog, ObjectIdentifier}
+import org.apache.flink.table.catalog.{CatalogManager, CatalogStoreHolder, FunctionCatalog, GenericInMemoryCatalog, GenericInMemoryCatalogStore, ObjectIdentifier}
 import org.apache.flink.table.data.RowData
 import org.apache.flink.table.delegation.{Executor, ExecutorFactory}
 import org.apache.flink.table.descriptors.ConnectorDescriptorValidator.CONNECTOR_TYPE
@@ -805,11 +806,23 @@ abstract class TableTestUtilBase(test: TableTestBase, isStreamingMode: Boolean) 
 
   final val PLAN_TEST_FORCE_OVERWRITE = "PLAN_TEST_FORCE_OVERWRITE"
 
-  /** Verify the serialized JSON of [[CompiledPlan]] for the given insert statement. */
+  /** Verify the json plan for the given insert statement. */
   def verifyJsonPlan(insert: String): Unit = {
     ExecNodeContext.resetIdCounter()
-    val jsonPlan = getTableEnv.asInstanceOf[TableEnvironmentInternal].compilePlanSql(insert)
-    val jsonPlanWithoutFlinkVersion = TableTestUtil.replaceFlinkVersion(jsonPlan.asJsonString())
+    val jsonPlan = getTableEnv.compilePlanSql(insert).asJsonString()
+    doVerifyJsonPlan(jsonPlan)
+  }
+
+  /** Verify the json plan for the given [[StatementSet]]. */
+  def verifyJsonPlan(stmtSet: StatementSet): Unit = {
+    ExecNodeContext.resetIdCounter()
+    val jsonPlan = stmtSet.compilePlan().asJsonString()
+    doVerifyJsonPlan(jsonPlan)
+  }
+
+  /** Verify the serialized JSON of [[CompiledPlan]] for the given insert statement. */
+  def doVerifyJsonPlan(jsonPlan: String): Unit = {
+    val jsonPlanWithoutFlinkVersion = TableTestUtil.replaceFlinkVersion(jsonPlan)
     // add the postfix to the path to avoid conflicts
     // between the test class name and the result file name
     val clazz = test.getClass
@@ -1614,6 +1627,13 @@ object TestingTableEnvironment {
             new GenericInMemoryCatalog(
               settings.getBuiltInCatalogName,
               settings.getBuiltInDatabaseName))
+          .catalogStoreHolder(
+            CatalogStoreHolder
+              .newBuilder()
+              .catalogStore(new GenericInMemoryCatalogStore)
+              .config(tableConfig)
+              .classloader(userClassLoader)
+              .build())
           .build
     }
 
@@ -1779,6 +1799,19 @@ object TableTestUtil {
     jsonNode.toPrettyString
   }
 
+  @throws[IOException]
+  def isValidJson(json: String): Boolean = {
+    try {
+      val parser = objectMapper.getFactory.createParser(json)
+      while (parser.nextToken() != null) {
+        // Do nothing, just parse the JSON string
+      }
+      true
+    } catch {
+      case _: JsonParseException => false
+    }
+  }
+
   /**
    * Stage {id} is ignored, because id keeps incrementing in test class while
    * StreamExecutionEnvironment is up
@@ -1810,6 +1843,8 @@ object TableTestUtil {
   /** Ignore exec node in operator name and description. */
   def replaceNodeIdInOperator(s: String): String = {
     s.replaceAll("\"contents\"\\s*:\\s*\"\\[\\d+\\]:", "\"contents\" : \"[]:")
+      // for sink v2.
+      .replaceAll("\"contents\"\\s*:\\s*\"(\\w+)\\[\\d+\\]:", "\"contents\" : \"$1[]:")
       .replaceAll("(\"type\"\\s*:\\s*\".*?)\\[\\d+\\]", "$1[]")
   }
 }

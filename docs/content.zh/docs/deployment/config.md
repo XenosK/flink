@@ -76,7 +76,7 @@ These values are configured as memory sizes, for example *1536m* or *2g*.
 
 You can configure checkpointing directly in code within your Flink job or application. Putting these values here in the configuration defines them as defaults in case the application does not configure anything.
 
-  - `state.backend.type`: The state backend to use. This defines the data structure mechanism for taking snapshots. Common values are `filesystem` or `rocksdb`.
+  - `state.backend.type`: The state backend to use. This defines the data structure mechanism for taking snapshots. Common values are `hashmap` or `rocksdb`.
   - `state.checkpoints.dir`: The directory to write checkpoints to. This takes a path URI like *s3://mybucket/flink-app/checkpoints* or *hdfs://namenode:port/flink/checkpoints*.
   - `state.savepoints.dir`: The default directory for savepoints. Takes a path URI, similar to `state.checkpoints.dir`.
   - `execution.checkpointing.interval`: The base interval setting. To enable checkpointing, you need to set this value larger than 0.
@@ -298,16 +298,6 @@ See the [History Server Docs]({{< ref "docs/deployment/advanced/historyserver" >
 
 *Options for experimental features in Flink.*
 
-### Queryable State
-
-*Queryable State* is an experimental features that gives lets you access Flink's internal state like a key/value store.
-See the [Queryable State Docs]({{< ref "docs/dev/datastream/fault-tolerance/queryable_state" >}}) for details.
-
-{{< generated/queryable_state_configuration >}}
-
-----
-----
-
 # Client
 
 {{< generated/client_configuration >}}
@@ -457,10 +447,10 @@ These options are for the network stack that handles the streaming and batch dat
 
 {{< generated/all_taskmanager_network_section >}}
 
-### RPC / Akka
+### RPC / Pekko
 
-Flink uses Akka for RPC between components (JobManager/TaskManager/ResourceManager).
-Flink does not use Akka for data transport.
+Flink uses Pekko for RPC between components (JobManager/TaskManager/ResourceManager).
+Flink does not use Pekko for data transport.
 
 {{< generated/akka_configuration >}}
 

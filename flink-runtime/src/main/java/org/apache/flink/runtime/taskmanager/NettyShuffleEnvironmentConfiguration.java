@@ -25,8 +25,10 @@ import org.apache.flink.configuration.NettyShuffleEnvironmentOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.io.network.netty.NettyConfig;
 import org.apache.flink.runtime.io.network.partition.BoundedBlockingSubpartitionType;
+import org.apache.flink.runtime.io.network.partition.hybrid.tiered.common.TieredStorageConfiguration;
 import org.apache.flink.runtime.throughput.BufferDebloatConfiguration;
 import org.apache.flink.runtime.util.ConfigurationParserUtils;
+import org.apache.flink.runtime.util.PortRange;
 import org.apache.flink.util.Preconditions;
 
 import org.slf4j.Logger;
@@ -43,6 +45,11 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
+import static org.apache.flink.api.common.BatchShuffleMode.ALL_EXCHANGES_HYBRID_FULL;
+import static org.apache.flink.api.common.BatchShuffleMode.ALL_EXCHANGES_HYBRID_SELECTIVE;
+import static org.apache.flink.configuration.ExecutionOptions.BATCH_SHUFFLE_MODE;
+import static org.apache.flink.configuration.NettyShuffleEnvironmentOptions.NETWORK_HYBRID_SHUFFLE_ENABLE_NEW_MODE;
+import static org.apache.flink.configuration.NettyShuffleEnvironmentOptions.NETWORK_HYBRID_SHUFFLE_REMOTE_STORAGE_BASE_PATH;
 import static org.apache.flink.util.Preconditions.checkArgument;
 
 /** Configuration object for the network stack. */
@@ -104,9 +111,11 @@ public class NettyShuffleEnvironmentConfiguration {
 
     private final int maxOverdraftBuffersPerGate;
 
-    private final int hybridShuffleSpilledIndexSegmentSize;
+    private final int hybridShuffleSpilledIndexRegionGroupSize;
 
     private final long hybridShuffleNumRetainedInMemoryRegionsMax;
+
+    private final TieredStorageConfiguration tieredStorageConfiguration;
 
     public NettyShuffleEnvironmentConfiguration(
             int numNetworkBuffers,
@@ -131,8 +140,9 @@ public class NettyShuffleEnvironmentConfiguration {
             int maxNumberOfConnections,
             boolean connectionReuseEnabled,
             int maxOverdraftBuffersPerGate,
-            int hybridShuffleSpilledIndexSegmentSize,
-            long hybridShuffleNumRetainedInMemoryRegionsMax) {
+            int hybridShuffleSpilledIndexRegionGroupSize,
+            long hybridShuffleNumRetainedInMemoryRegionsMax,
+            @Nullable TieredStorageConfiguration tieredStorageConfiguration) {
 
         this.numNetworkBuffers = numNetworkBuffers;
         this.networkBufferSize = networkBufferSize;
@@ -156,9 +166,10 @@ public class NettyShuffleEnvironmentConfiguration {
         this.maxNumberOfConnections = maxNumberOfConnections;
         this.connectionReuseEnabled = connectionReuseEnabled;
         this.maxOverdraftBuffersPerGate = maxOverdraftBuffersPerGate;
-        this.hybridShuffleSpilledIndexSegmentSize = hybridShuffleSpilledIndexSegmentSize;
+        this.hybridShuffleSpilledIndexRegionGroupSize = hybridShuffleSpilledIndexRegionGroupSize;
         this.hybridShuffleNumRetainedInMemoryRegionsMax =
                 hybridShuffleNumRetainedInMemoryRegionsMax;
+        this.tieredStorageConfiguration = tieredStorageConfiguration;
     }
 
     // ------------------------------------------------------------------------
@@ -259,8 +270,12 @@ public class NettyShuffleEnvironmentConfiguration {
         return hybridShuffleNumRetainedInMemoryRegionsMax;
     }
 
-    public int getHybridShuffleSpilledIndexSegmentSize() {
-        return hybridShuffleSpilledIndexSegmentSize;
+    public int getHybridShuffleSpilledIndexRegionGroupSize() {
+        return hybridShuffleSpilledIndexRegionGroupSize;
+    }
+
+    public TieredStorageConfiguration getTieredStorageConfiguration() {
+        return tieredStorageConfiguration;
     }
 
     // ------------------------------------------------------------------------
@@ -282,7 +297,7 @@ public class NettyShuffleEnvironmentConfiguration {
             boolean localTaskManagerCommunication,
             InetAddress taskManagerAddress) {
 
-        final int dataBindPort = getDataBindPort(configuration);
+        final PortRange dataBindPortRange = getDataBindPortRange(configuration);
 
         final int pageSize = ConfigurationParserUtils.getPageSize(configuration);
 
@@ -291,7 +306,7 @@ public class NettyShuffleEnvironmentConfiguration {
                         configuration,
                         localTaskManagerCommunication,
                         taskManagerAddress,
-                        dataBindPort);
+                        dataBindPortRange);
 
         final int numberOfNetworkBuffers =
                 calculateNumberOfNetworkBuffers(configuration, networkMemorySize, pageSize);
@@ -367,7 +382,8 @@ public class NettyShuffleEnvironmentConfiguration {
 
         int hybridShuffleSpilledIndexSegmentSize =
                 configuration.get(
-                        NettyShuffleEnvironmentOptions.HYBRID_SHUFFLE_SPILLED_INDEX_SEGMENT_SIZE);
+                        NettyShuffleEnvironmentOptions
+                                .HYBRID_SHUFFLE_SPILLED_INDEX_REGION_GROUP_SIZE);
 
         long hybridShuffleNumRetainedInMemoryRegionsMax =
                 configuration.get(
@@ -387,6 +403,17 @@ public class NettyShuffleEnvironmentConfiguration {
                         "The configured floating buffer should be at least 1, please increase the value of %s.",
                         NettyShuffleEnvironmentOptions.NETWORK_EXTRA_BUFFERS_PER_GATE.key()));
 
+        TieredStorageConfiguration tieredStorageConfiguration = null;
+        if ((configuration.get(BATCH_SHUFFLE_MODE) == ALL_EXCHANGES_HYBRID_FULL
+                        || configuration.get(BATCH_SHUFFLE_MODE) == ALL_EXCHANGES_HYBRID_SELECTIVE)
+                && configuration.getBoolean(NETWORK_HYBRID_SHUFFLE_ENABLE_NEW_MODE)) {
+            tieredStorageConfiguration =
+                    TieredStorageConfiguration.builder(
+                                    pageSize,
+                                    configuration.getString(
+                                            NETWORK_HYBRID_SHUFFLE_REMOTE_STORAGE_BASE_PATH))
+                            .build();
+        }
         return new NettyShuffleEnvironmentConfiguration(
                 numberOfNetworkBuffers,
                 pageSize,
@@ -411,7 +438,8 @@ public class NettyShuffleEnvironmentConfiguration {
                 connectionReuseEnabled,
                 maxOverdraftBuffersPerGate,
                 hybridShuffleSpilledIndexSegmentSize,
-                hybridShuffleNumRetainedInMemoryRegionsMax);
+                hybridShuffleNumRetainedInMemoryRegionsMax,
+                tieredStorageConfiguration);
     }
 
     /**
@@ -420,26 +448,22 @@ public class NettyShuffleEnvironmentConfiguration {
      * @param configuration configuration object
      * @return the data port
      */
-    private static int getDataBindPort(Configuration configuration) {
-        final int dataBindPort;
+    private static PortRange getDataBindPortRange(Configuration configuration) {
         if (configuration.contains(NettyShuffleEnvironmentOptions.DATA_BIND_PORT)) {
-            dataBindPort = configuration.getInteger(NettyShuffleEnvironmentOptions.DATA_BIND_PORT);
-            ConfigurationParserUtils.checkConfigParameter(
-                    dataBindPort >= 0,
-                    dataBindPort,
-                    NettyShuffleEnvironmentOptions.DATA_BIND_PORT.key(),
-                    "Leave config parameter empty to fallback to '"
-                            + NettyShuffleEnvironmentOptions.DATA_PORT.key()
-                            + "' automatically.");
-        } else {
-            dataBindPort = configuration.getInteger(NettyShuffleEnvironmentOptions.DATA_PORT);
-            ConfigurationParserUtils.checkConfigParameter(
-                    dataBindPort >= 0,
-                    dataBindPort,
-                    NettyShuffleEnvironmentOptions.DATA_PORT.key(),
-                    "Leave config parameter empty or use 0 to let the system choose a port automatically.");
+            String dataBindPort =
+                    configuration.getString(NettyShuffleEnvironmentOptions.DATA_BIND_PORT);
+
+            return new PortRange(dataBindPort);
         }
-        return dataBindPort;
+
+        int dataBindPort = configuration.getInteger(NettyShuffleEnvironmentOptions.DATA_PORT);
+        ConfigurationParserUtils.checkConfigParameter(
+                dataBindPort >= 0,
+                dataBindPort,
+                NettyShuffleEnvironmentOptions.DATA_PORT.key(),
+                "Leave config parameter empty or use 0 to let the system choose a port automatically.");
+
+        return new PortRange(dataBindPort);
     }
 
     /**
@@ -484,7 +508,7 @@ public class NettyShuffleEnvironmentConfiguration {
      * @param localTaskManagerCommunication true, to skip initializing the network stack
      * @param taskManagerAddress identifying the IP address under which the TaskManager will be
      *     accessible
-     * @param dataport data port for communication and data exchange
+     * @param dataPortRange data port range for communication and data exchange
      * @return the netty configuration or {@code null} if communication is in the same task manager
      */
     @Nullable
@@ -492,17 +516,17 @@ public class NettyShuffleEnvironmentConfiguration {
             Configuration configuration,
             boolean localTaskManagerCommunication,
             InetAddress taskManagerAddress,
-            int dataport) {
+            PortRange dataPortRange) {
 
         final NettyConfig nettyConfig;
         if (!localTaskManagerCommunication) {
             final InetSocketAddress taskManagerInetSocketAddress =
-                    new InetSocketAddress(taskManagerAddress, dataport);
+                    new InetSocketAddress(taskManagerAddress, 0);
 
             nettyConfig =
                     new NettyConfig(
                             taskManagerInetSocketAddress.getAddress(),
-                            taskManagerInetSocketAddress.getPort(),
+                            dataPortRange,
                             ConfigurationParserUtils.getPageSize(configuration),
                             ConfigurationParserUtils.getSlot(configuration),
                             configuration);

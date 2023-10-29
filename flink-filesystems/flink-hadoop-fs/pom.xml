@@ -23,13 +23,24 @@ under the License.
 	<parent>
 		<groupId>org.apache.flink</groupId>
 		<artifactId>flink-filesystems</artifactId>
-		<version>1.18-SNAPSHOT</version>
+		<version>1.19-SNAPSHOT</version>
 	</parent>
 
 	<artifactId>flink-hadoop-fs</artifactId>
 	<name>Flink : FileSystems : Hadoop FS</name>
 
 	<packaging>jar</packaging>
+
+	<properties>
+		<surefire.module.config><!--
+			HadoopConfigLoadingTest
+			-->--add-opens=java.base/java.util=ALL-UNNAMED <!--
+			HadoopUtilsTest
+			-->--add-exports=java.security.jgss/sun.security.krb5=ALL-UNNAMED <!--
+			HadoopDataInputStreamTest
+			-->--add-opens=java.base/java.io=ALL-UNNAMED
+		</surefire.module.config>
+	</properties>
 
 	<dependencies>
 		<dependency>

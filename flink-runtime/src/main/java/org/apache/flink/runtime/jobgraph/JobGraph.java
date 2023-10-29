@@ -24,9 +24,9 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.cache.DistributedCache;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.StateChangelogOptionsInternal;
+import org.apache.flink.core.execution.JobStatusHook;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.blob.PermanentBlobKey;
-import org.apache.flink.runtime.executiongraph.JobStatusHook;
 import org.apache.flink.runtime.jobgraph.tasks.JobCheckpointingSettings;
 import org.apache.flink.runtime.jobmanager.scheduler.CoLocationGroup;
 import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
@@ -379,9 +379,7 @@ public class JobGraph implements Serializable {
             return false;
         }
 
-        long checkpointInterval =
-                snapshotSettings.getCheckpointCoordinatorConfiguration().getCheckpointInterval();
-        return checkpointInterval > 0 && checkpointInterval < Long.MAX_VALUE;
+        return snapshotSettings.getCheckpointCoordinatorConfiguration().isCheckpointingEnabled();
     }
 
     /**

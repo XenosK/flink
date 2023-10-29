@@ -112,7 +112,8 @@ object HashAggCodeGenerator {
 
     val aggInfos = aggInfoList.aggInfos
     val functionIdentifiers = AggCodeGenHelper.getFunctionIdentifiers(aggInfos)
-    val aggBufferNames = AggCodeGenHelper.getAggBufferNames(auxGrouping, aggInfos)
+    val aggBufferPrefix = "hash"
+    val aggBufferNames = AggCodeGenHelper.getAggBufferNames(aggBufferPrefix, auxGrouping, aggInfos)
     val aggBufferTypes = AggCodeGenHelper.getAggBufferTypes(inputType, auxGrouping, aggInfos)
     val groupKeyRowType = RowTypeUtils.projectRowType(inputType, grouping)
     val aggBufferRowType = RowType.of(aggBufferTypes.flatten, aggBufferNames.flatten)
@@ -141,21 +142,6 @@ object HashAggCodeGenerator {
         outRecordTerm = currentKeyTerm,
         outRecordWriterTerm = currentKeyWriterTerm)
       .code
-
-    val valueProjectionCode =
-      if (!isFinal && supportAdaptiveLocalHashAgg) {
-        ProjectionCodeGenerator.genAdaptiveLocalHashAggValueProjectionCode(
-          ctx,
-          inputType,
-          classOf[BinaryRowData],
-          inputTerm = inputTerm,
-          aggInfos,
-          outRecordTerm = currentValueTerm,
-          outRecordWriterTerm = currentValueWriterTerm
-        )
-      } else {
-        ""
-      }
 
     // gen code to create groupKey, aggBuffer Type array
     // it will be used in BytesHashMap and BufferedKVExternalSorter if enable fallback
@@ -234,6 +220,7 @@ object HashAggCodeGenerator {
       aggregateMapTerm,
       (groupKeyTypesTerm, aggBufferTypesTerm),
       (groupKeyRowType, aggBufferRowType),
+      aggBufferPrefix,
       aggBufferNames,
       aggBufferTypes,
       outputTerm,
@@ -264,6 +251,22 @@ object HashAggCodeGenerator {
     }
     val localAggSuppressedTerm = CodeGenUtils.newName("localAggSuppressed")
     ctx.addReusableMember(s"private transient boolean $localAggSuppressedTerm = false;")
+    val valueProjectionCode =
+      if (!isFinal && supportAdaptiveLocalHashAgg) {
+        ProjectionCodeGenerator.genAdaptiveLocalHashAggValueProjectionCode(
+          ctx,
+          inputType,
+          classOf[BinaryRowData],
+          inputTerm = inputTerm,
+          aggInfos,
+          auxGrouping,
+          outRecordTerm = currentValueTerm,
+          outRecordWriterTerm = currentValueWriterTerm
+        )
+      } else {
+        ""
+      }
+
     val (
       distinctCountIncCode,
       totalCountIncCode,

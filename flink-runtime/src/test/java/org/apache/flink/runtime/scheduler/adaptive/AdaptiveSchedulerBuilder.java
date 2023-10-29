@@ -20,6 +20,7 @@ package org.apache.flink.runtime.scheduler.adaptive;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.core.failure.FailureEnricher;
 import org.apache.flink.runtime.blob.BlobWriter;
 import org.apache.flink.runtime.blob.VoidBlobWriter;
 import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
@@ -49,6 +50,8 @@ import org.apache.flink.util.FatalExitExceptionHandler;
 
 import javax.annotation.Nullable;
 
+import java.util.Collection;
+import java.util.Collections;
 import java.util.concurrent.ScheduledExecutorService;
 
 /** Builder for {@link AdaptiveScheduler}. */
@@ -58,6 +61,7 @@ public class AdaptiveSchedulerBuilder {
     private final JobGraph jobGraph;
 
     private final ComponentMainThreadExecutor mainThreadExecutor;
+    private final ScheduledExecutorService executorService;
 
     @Nullable private JobResourceRequirements jobResourceRequirements;
 
@@ -80,12 +84,15 @@ public class AdaptiveSchedulerBuilder {
                     FatalExitExceptionHandler.INSTANCE.uncaughtException(
                             Thread.currentThread(), error);
     private JobStatusListener jobStatusListener = (ignoredA, ignoredB, ignoredC) -> {};
+    private Collection<FailureEnricher> failureEnrichers = Collections.emptySet();
     private long initializationTimestamp = System.currentTimeMillis();
 
     @Nullable private SlotAllocator slotAllocator;
 
     public AdaptiveSchedulerBuilder(
-            final JobGraph jobGraph, ComponentMainThreadExecutor mainThreadExecutor) {
+            final JobGraph jobGraph,
+            ComponentMainThreadExecutor mainThreadExecutor,
+            ScheduledExecutorService executorService) {
         this.jobGraph = jobGraph;
         this.mainThreadExecutor = mainThreadExecutor;
 
@@ -96,6 +103,7 @@ public class AdaptiveSchedulerBuilder {
                         ignored -> {},
                         DEFAULT_TIMEOUT,
                         rpcTimeout);
+        this.executorService = executorService;
     }
 
     public AdaptiveSchedulerBuilder setJobResourceRequirements(
@@ -176,6 +184,12 @@ public class AdaptiveSchedulerBuilder {
         return this;
     }
 
+    public AdaptiveSchedulerBuilder setFailureEnrichers(
+            Collection<FailureEnricher> failureEnrichers) {
+        this.failureEnrichers = failureEnrichers;
+        return this;
+    }
+
     public AdaptiveSchedulerBuilder setInitializationTimestamp(long initializationTimestamp) {
         this.initializationTimestamp = initializationTimestamp;
         return this;
@@ -186,7 +200,7 @@ public class AdaptiveSchedulerBuilder {
         return this;
     }
 
-    public AdaptiveScheduler build(ScheduledExecutorService executorService) throws Exception {
+    public AdaptiveScheduler build() throws Exception {
         final ExecutionGraphFactory executionGraphFactory =
                 new DefaultExecutionGraphFactory(
                         jobMasterConfiguration,
@@ -221,6 +235,7 @@ public class AdaptiveSchedulerBuilder {
                 mainThreadExecutor,
                 fatalErrorHandler,
                 jobStatusListener,
+                failureEnrichers,
                 executionGraphFactory);
     }
 }

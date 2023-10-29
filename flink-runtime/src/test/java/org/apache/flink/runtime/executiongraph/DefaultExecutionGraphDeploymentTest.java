@@ -58,6 +58,7 @@ import org.apache.flink.runtime.scheduler.TestingPhysicalSlot;
 import org.apache.flink.runtime.scheduler.TestingPhysicalSlotProvider;
 import org.apache.flink.runtime.scheduler.strategy.ConsumedPartitionGroup;
 import org.apache.flink.runtime.shuffle.ShuffleDescriptor;
+import org.apache.flink.runtime.taskexecutor.NoOpShuffleDescriptorsCache;
 import org.apache.flink.runtime.taskexecutor.TestingTaskExecutorGateway;
 import org.apache.flink.runtime.taskexecutor.TestingTaskExecutorGatewayBuilder;
 import org.apache.flink.runtime.taskmanager.LocalTaskManagerLocation;
@@ -109,7 +110,8 @@ class DefaultExecutionGraphDeploymentTest {
      * @param eg the execution graph that was created
      */
     protected void checkJobOffloaded(DefaultExecutionGraph eg) throws Exception {
-        assertThat(eg.getJobInformationOrBlobKey().isLeft()).isTrue();
+        assertThat(eg.getTaskDeploymentDescriptorFactory().getSerializedJobInformation())
+                .isInstanceOf(TaskDeploymentDescriptor.NonOffloaded.class);
     }
 
     /**
@@ -177,7 +179,8 @@ class DefaultExecutionGraphDeploymentTest {
         taskManagerGateway.setSubmitConsumer(
                 FunctionUtils.uncheckedConsumer(
                         taskDeploymentDescriptor -> {
-                            taskDeploymentDescriptor.loadBigData(blobCache);
+                            taskDeploymentDescriptor.loadBigData(
+                                    blobCache, NoOpShuffleDescriptorsCache.INSTANCE);
                             tdd.complete(taskDeploymentDescriptor);
                         }));
 
@@ -217,8 +220,8 @@ class DefaultExecutionGraphDeploymentTest {
                 descr.getProducedPartitions();
         Collection<InputGateDeploymentDescriptor> consumedPartitions = descr.getInputGates();
 
-        assertThat(producedPartitions.size()).isEqualTo(2);
-        assertThat(consumedPartitions.size()).isEqualTo(1);
+        assertThat(producedPartitions).hasSize((2));
+        assertThat(consumedPartitions).hasSize(1);
 
         Iterator<ResultPartitionDeploymentDescriptor> iteratorProducedPartitions =
                 producedPartitions.iterator();
@@ -525,7 +528,7 @@ class DefaultExecutionGraphDeploymentTest {
         scheduler.startScheduling();
 
         Map<ExecutionAttemptID, Execution> executions = eg.getRegisteredExecutions();
-        assertThat(executions.size()).isEqualTo(dop1 + dop2);
+        assertThat(executions).hasSize(dop1 + dop2);
 
         return scheduler;
     }

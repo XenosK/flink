@@ -194,7 +194,9 @@ public class StreamExecutionEnvironment implements AutoCloseable {
 
     private long bufferTimeout = ExecutionOptions.BUFFER_TIMEOUT.defaultValue().toMillis();
 
-    protected boolean isChainingEnabled = true;
+    private boolean isChainingEnabled = true;
+
+    private boolean isChainingOfOperatorsWithDifferentMaxParallelismEnabled = true;
 
     /** The state backend used for storing k/v state and state snapshots. */
     private StateBackend defaultStateBackend;
@@ -473,6 +475,11 @@ public class StreamExecutionEnvironment implements AutoCloseable {
     @PublicEvolving
     public boolean isChainingEnabled() {
         return isChainingEnabled;
+    }
+
+    @PublicEvolving
+    public boolean isChainingOfOperatorsWithDifferentMaxParallelismEnabled() {
+        return isChainingOfOperatorsWithDifferentMaxParallelismEnabled;
     }
 
     // ------------------------------------------------------------------------
@@ -991,8 +998,10 @@ public class StreamExecutionEnvironment implements AutoCloseable {
                 .getOptional(PipelineOptions.OPERATOR_CHAINING)
                 .ifPresent(c -> this.isChainingEnabled = c);
         configuration
-                .getOptional(ExecutionOptions.BUFFER_TIMEOUT)
-                .ifPresent(t -> this.setBufferTimeout(t.toMillis()));
+                .getOptional(
+                        PipelineOptions
+                                .OPERATOR_CHAINING_CHAIN_OPERATORS_WITH_DIFFERENT_MAX_PARALLELISM)
+                .ifPresent(c -> this.isChainingOfOperatorsWithDifferentMaxParallelismEnabled = c);
         configuration
                 .getOptional(DeploymentOptions.JOB_LISTENERS)
                 .ifPresent(listeners -> registerCustomListeners(classLoader, listeners));
@@ -1052,6 +1061,8 @@ public class StreamExecutionEnvironment implements AutoCloseable {
                                         BatchExecutionOptions.ADAPTIVE_AUTO_PARALLELISM_ENABLED,
                                         flag));
 
+        configBufferTimeout(configuration);
+
         config.configure(configuration, classLoader);
         checkpointCfg.configure(configuration);
     }
@@ -1074,6 +1085,16 @@ public class StreamExecutionEnvironment implements AutoCloseable {
             return StateBackendLoader.loadStateBackendFromConfig(configuration, classLoader, null);
         } catch (DynamicCodeLoadingException | IOException e) {
             throw new WrappingRuntimeException(e);
+        }
+    }
+
+    private void configBufferTimeout(ReadableConfig configuration) {
+        if (configuration.get(ExecutionOptions.BUFFER_TIMEOUT_ENABLED)) {
+            configuration
+                    .getOptional(ExecutionOptions.BUFFER_TIMEOUT)
+                    .ifPresent(t -> this.setBufferTimeout(t.toMillis()));
+        } else {
+            this.setBufferTimeout(ExecutionOptions.DISABLED_NETWORK_BUFFER_TIMEOUT);
         }
     }
 
@@ -1889,7 +1910,12 @@ public class StreamExecutionEnvironment implements AutoCloseable {
      * @param function the user defined function
      * @param <OUT> type of the returned stream
      * @return the data stream constructed
+     * @deprecated This method relies on the {@link
+     *     org.apache.flink.streaming.api.functions.source.SourceFunction} API, which is due to be
+     *     removed. Use the {@link #fromSource(Source, WatermarkStrategy, String)} method based on
+     *     the new {@link org.apache.flink.api.connector.source.Source} API instead.
      */
+    @Deprecated
     public <OUT> DataStreamSource<OUT> addSource(SourceFunction<OUT> function) {
         return addSource(function, "Custom Source");
     }
@@ -1903,7 +1929,12 @@ public class StreamExecutionEnvironment implements AutoCloseable {
      * @param sourceName Name of the data source
      * @param <OUT> type of the returned stream
      * @return the data stream constructed
+     * @deprecated This method relies on the {@link
+     *     org.apache.flink.streaming.api.functions.source.SourceFunction} API, which is due to be
+     *     removed. Use the {@link #fromSource(Source, WatermarkStrategy, String)} method based on
+     *     the new {@link org.apache.flink.api.connector.source.Source} API instead.
      */
+    @Deprecated
     public <OUT> DataStreamSource<OUT> addSource(SourceFunction<OUT> function, String sourceName) {
         return addSource(function, sourceName, null);
     }
@@ -1917,7 +1948,12 @@ public class StreamExecutionEnvironment implements AutoCloseable {
      * @param <OUT> type of the returned stream
      * @param typeInfo the user defined type information for the stream
      * @return the data stream constructed
+     * @deprecated This method relies on the {@link
+     *     org.apache.flink.streaming.api.functions.source.SourceFunction} API, which is due to be
+     *     removed. Use the {@link #fromSource(Source, WatermarkStrategy, String, TypeInformation)}
+     *     method based on the new {@link org.apache.flink.api.connector.source.Source} API instead.
      */
+    @Deprecated
     public <OUT> DataStreamSource<OUT> addSource(
             SourceFunction<OUT> function, TypeInformation<OUT> typeInfo) {
         return addSource(function, "Custom Source", typeInfo);
@@ -1933,7 +1969,12 @@ public class StreamExecutionEnvironment implements AutoCloseable {
      * @param <OUT> type of the returned stream
      * @param typeInfo the user defined type information for the stream
      * @return the data stream constructed
+     * @deprecated This method relies on the {@link
+     *     org.apache.flink.streaming.api.functions.source.SourceFunction} API, which is due to be
+     *     removed. Use the {@link #fromSource(Source, WatermarkStrategy, String, TypeInformation)}
+     *     method based on the new {@link org.apache.flink.api.connector.source.Source} API instead.
      */
+    @Deprecated
     public <OUT> DataStreamSource<OUT> addSource(
             SourceFunction<OUT> function, String sourceName, TypeInformation<OUT> typeInfo) {
         return addSource(function, sourceName, typeInfo, Boundedness.CONTINUOUS_UNBOUNDED);
@@ -2290,6 +2331,8 @@ public class StreamExecutionEnvironment implements AutoCloseable {
                 .setChangelogStateBackendEnabled(changelogStateBackendEnabled)
                 .setSavepointDir(defaultSavepointDirectory)
                 .setChaining(isChainingEnabled)
+                .setChainingOfOperatorsWithDifferentMaxParallelism(
+                        isChainingOfOperatorsWithDifferentMaxParallelismEnabled)
                 .setUserArtifacts(cacheFile)
                 .setTimeCharacteristic(timeCharacteristic)
                 .setDefaultBufferTimeout(bufferTimeout)
@@ -2569,7 +2612,7 @@ public class StreamExecutionEnvironment implements AutoCloseable {
 
     protected static void initializeContextEnvironment(StreamExecutionEnvironmentFactory ctx) {
         contextEnvironmentFactory = ctx;
-        threadLocalContextEnvironmentFactory.set(contextEnvironmentFactory);
+        threadLocalContextEnvironmentFactory.set(ctx);
     }
 
     protected static void resetContextEnvironment() {

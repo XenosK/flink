@@ -527,19 +527,15 @@ public class ContinuousFileReaderOperator<OUT, T extends TimestampedInputSplit>
 
         int subtaskIdx = getRuntimeContext().getIndexOfThisSubtask();
 
-        checkpointedState.clear();
-
         List<T> readerState = getReaderState();
 
         try {
-            for (T split : readerState) {
-                checkpointedState.add(split);
-            }
+            checkpointedState.update(readerState);
         } catch (Exception e) {
             checkpointedState.clear();
 
             throw new Exception(
-                    "Could not add timestamped file input splits to to operator "
+                    "Could not add timestamped file input splits to operator "
                             + "state backend of operator "
                             + getOperatorName()
                             + '.',

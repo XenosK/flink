@@ -18,6 +18,10 @@
 
 package org.apache.flink.runtime.rest.messages;
 
+import org.apache.flink.testutils.junit.extensions.parameterized.NoOpTestExtension;
+
+import org.junit.jupiter.api.extension.ExtendWith;
+
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -27,7 +31,8 @@ import java.util.List;
  * Tests that the {@link JobExceptionsInfoWithHistory} with no root exception can be marshalled and
  * unmarshalled.
  */
-public class JobExceptionsInfoWithHistoryNoRootTest
+@ExtendWith(NoOpTestExtension.class)
+class JobExceptionsInfoWithHistoryNoRootTest
         extends RestResponseMarshallingTestBase<JobExceptionsInfoWithHistory> {
     @Override
     protected Class<JobExceptionsInfoWithHistory> getTestResponseClass() {
@@ -63,11 +68,13 @@ public class JobExceptionsInfoWithHistoryNoRootTest
                                         "global failure #0",
                                         "stacktrace #0",
                                         0L,
+                                        Collections.emptyMap(),
                                         Collections.singletonList(
                                                 new JobExceptionsInfoWithHistory.ExceptionInfo(
                                                         "local task failure #2",
                                                         "stacktrace #2",
                                                         2L,
+                                                        Collections.emptyMap(),
                                                         "task name #2",
                                                         "location #2",
                                                         "taskManagerId #2"))),
@@ -75,6 +82,7 @@ public class JobExceptionsInfoWithHistoryNoRootTest
                                         "local task failure #1",
                                         "stacktrace #1",
                                         1L,
+                                        Collections.emptyMap(),
                                         "task name",
                                         "location",
                                         "taskManagerId",

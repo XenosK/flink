@@ -30,26 +30,35 @@ import java.util.function.BiConsumer;
  * Accumulates received records into buffers. The {@link BufferAccumulator} receives the records
  * from tiered store producer and the records will accumulate and transform into buffers.
  */
-public interface BufferAccumulator {
+public interface BufferAccumulator extends AutoCloseable {
 
     /**
      * Setup the accumulator.
      *
-     * @param numSubpartitions number of subpartitions
      * @param bufferFlusher accepts the accumulated buffers. The first field is the subpartition id,
      *     while the list in the second field contains accumulated buffers in order for that
      *     subpartition.
      */
-    void setup(
-            int numSubpartitions,
-            BiConsumer<TieredStorageSubpartitionId, List<Buffer>> bufferFlusher);
+    void setup(BiConsumer<TieredStorageSubpartitionId, List<Buffer>> bufferFlusher);
 
     /**
      * Receives the records from tiered store producer, these records will be accumulated and
      * transformed into finished buffers.
+     *
+     * <p>Note that when isBroadcast is true, for a broadcast-only partition, the subpartitionId
+     * value will always be 0. Conversely, for a non-broadcast-only partition, the subpartitionId
+     * value will range from 0 to the number of subpartitions.
+     *
+     * @param record the received record
+     * @param subpartitionId the subpartition id of the record
+     * @param dataType the data type of the record
+     * @param isBroadcast whether the record is a broadcast record
      */
     void receive(
-            ByteBuffer record, TieredStorageSubpartitionId subpartitionId, Buffer.DataType dataType)
+            ByteBuffer record,
+            TieredStorageSubpartitionId subpartitionId,
+            Buffer.DataType dataType,
+            boolean isBroadcast)
             throws IOException;
 
     /**

@@ -52,7 +52,7 @@ import org.apache.flink.runtime.state.CheckpointStorageLocationReference;
 import org.apache.flink.util.concurrent.FutureUtils;
 import org.apache.flink.util.function.CheckedSupplier;
 
-import org.apache.flink.shaded.guava30.com.google.common.collect.Lists;
+import org.apache.flink.shaded.guava31.com.google.common.collect.Lists;
 
 import org.hamcrest.Matchers;
 import org.junit.Test;
@@ -401,8 +401,8 @@ public class LocalInputChannelTest {
      * and has not much more general value. If it becomes obsolete at some point (future greatness
      * ;)), feel free to remove it.
      *
-     * <p>The fix in the end was to to not acquire the channels lock when releasing it and/or not
-     * doing any input gate callbacks while holding the channel's lock. I decided to do both.
+     * <p>The fix in the end was to not acquire the channels lock when releasing it and/or not doing
+     * any input gate callbacks while holding the channel's lock. I decided to do both.
      */
     @Test
     public void testConcurrentReleaseAndRetriggerPartitionRequest() throws Exception {

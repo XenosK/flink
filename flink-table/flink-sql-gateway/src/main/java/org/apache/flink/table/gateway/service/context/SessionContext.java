@@ -27,8 +27,12 @@ import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.config.TableConfigOptions;
 import org.apache.flink.table.catalog.Catalog;
 import org.apache.flink.table.catalog.CatalogManager;
+import org.apache.flink.table.catalog.CatalogStoreHolder;
 import org.apache.flink.table.catalog.FunctionCatalog;
 import org.apache.flink.table.catalog.GenericInMemoryCatalog;
+import org.apache.flink.table.factories.CatalogStoreFactory;
+import org.apache.flink.table.factories.FactoryUtil;
+import org.apache.flink.table.factories.TableFactoryUtil;
 import org.apache.flink.table.gateway.api.endpoint.EndpointVersion;
 import org.apache.flink.table.gateway.api.session.SessionEnvironment;
 import org.apache.flink.table.gateway.api.session.SessionHandle;
@@ -135,7 +139,8 @@ public class SessionContext {
     public void set(String key, String value) {
         try {
             // Test whether the key value will influence the creation of the Executor.
-            createOperationExecutor(Configuration.fromMap(Collections.singletonMap(key, value)));
+            createOperationExecutor(Configuration.fromMap(Collections.singletonMap(key, value)))
+                    .getTableEnvironment();
         } catch (Exception e) {
             // get error and reset the key with old value
             throw new SqlExecutionException(
@@ -320,11 +325,29 @@ public class SessionContext {
             Configuration configuration,
             URLClassLoader userClassLoader,
             SessionEnvironment environment) {
+
+        CatalogStoreFactory catalogStoreFactory =
+                TableFactoryUtil.findAndCreateCatalogStoreFactory(configuration, userClassLoader);
+        CatalogStoreFactory.Context catalogStoreFactoryContext =
+                TableFactoryUtil.buildCatalogStoreFactoryContext(configuration, userClassLoader);
+        catalogStoreFactory.open(catalogStoreFactoryContext);
+        CatalogStoreHolder catalogStore =
+                CatalogStoreHolder.newBuilder()
+                        .catalogStore(catalogStoreFactory.createCatalogStore())
+                        .classloader(userClassLoader)
+                        .config(configuration)
+                        .factory(catalogStoreFactory)
+                        .build();
+
         CatalogManager.Builder builder =
                 CatalogManager.newBuilder()
                         // Currently, the classloader is only used by DataTypeFactory.
                         .classLoader(userClassLoader)
-                        .config(configuration);
+                        .config(configuration)
+                        .catalogModificationListeners(
+                                TableFactoryUtil.findCatalogModificationListenerList(
+                                        configuration, userClassLoader))
+                        .catalogStoreHolder(catalogStore);
 
         // init default catalog
         String defaultCatalogName;
@@ -349,8 +372,19 @@ public class SessionContext {
             }
 
             defaultCatalog =
-                    new GenericInMemoryCatalog(
-                            defaultCatalogName, settings.getBuiltInDatabaseName());
+                    catalogStore
+                            .catalogStore()
+                            .getCatalog(defaultCatalogName)
+                            .map(
+                                    catalogDescriptor ->
+                                            FactoryUtil.createCatalog(
+                                                    defaultCatalogName,
+                                                    catalogDescriptor.getConfiguration().toMap(),
+                                                    catalogStore.config(),
+                                                    catalogStore.classLoader()))
+                            .orElse(
+                                    new GenericInMemoryCatalog(
+                                            defaultCatalogName, settings.getBuiltInDatabaseName()));
         }
         defaultCatalog.open();
 

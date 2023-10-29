@@ -28,6 +28,7 @@ import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.deployment.InputGateDeploymentDescriptor;
 import org.apache.flink.runtime.deployment.TaskDeploymentDescriptor;
 import org.apache.flink.runtime.deployment.TaskDeploymentDescriptorFactory.ShuffleDescriptorAndIndex;
+import org.apache.flink.runtime.deployment.TaskDeploymentDescriptorFactory.ShuffleDescriptorGroup;
 import org.apache.flink.runtime.event.TaskEvent;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.executiongraph.IndexRange;
@@ -71,7 +72,7 @@ import org.apache.flink.runtime.shuffle.UnknownShuffleDescriptor;
 import org.apache.flink.runtime.util.NettyShuffleDescriptorBuilder;
 import org.apache.flink.util.CompressedSerializedValue;
 
-import org.apache.flink.shaded.guava30.com.google.common.io.Closer;
+import org.apache.flink.shaded.guava31.com.google.common.io.Closer;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -1323,7 +1324,8 @@ public class SingleInputGateTest extends InputGateTestBase {
                         channelDescs.length,
                         Collections.singletonList(
                                 new TaskDeploymentDescriptor.NonOffloaded<>(
-                                        CompressedSerializedValue.fromObject(channelDescs))));
+                                        CompressedSerializedValue.fromObject(
+                                                new ShuffleDescriptorGroup(channelDescs)))));
 
         final TaskMetricGroup taskMetricGroup =
                 UnregisteredMetricGroups.createUnregisteredTaskMetricGroup();
@@ -1337,7 +1339,9 @@ public class SingleInputGateTest extends InputGateTestBase {
                                 ? resultPartitionManager
                                 : netEnv.getResultPartitionManager(),
                         new TaskEventDispatcher(),
-                        netEnv.getNetworkBufferPool())
+                        netEnv.getNetworkBufferPool(),
+                        null,
+                        null)
                 .create(
                         netEnv.createShuffleIOOwnerContext(
                                 "TestTask", taskMetricGroup.executionId(), taskMetricGroup),

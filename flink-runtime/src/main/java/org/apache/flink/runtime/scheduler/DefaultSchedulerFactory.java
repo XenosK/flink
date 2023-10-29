@@ -21,8 +21,10 @@ package org.apache.flink.runtime.scheduler;
 
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.time.Time;
+import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.core.failure.FailureEnricher;
 import org.apache.flink.runtime.blob.BlobWriter;
 import org.apache.flink.runtime.blocklist.BlocklistOperations;
 import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
@@ -44,6 +46,7 @@ import org.apache.flink.util.concurrent.ScheduledExecutorServiceAdapter;
 
 import org.slf4j.Logger;
 
+import java.util.Collection;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 
@@ -74,6 +77,7 @@ public class DefaultSchedulerFactory implements SchedulerNGFactory {
             final ComponentMainThreadExecutor mainThreadExecutor,
             final FatalErrorHandler fatalErrorHandler,
             final JobStatusListener jobStatusListener,
+            final Collection<FailureEnricher> failureEnrichers,
             final BlocklistOperations blocklistOperations)
             throws Exception {
 
@@ -119,6 +123,11 @@ public class DefaultSchedulerFactory implements SchedulerNGFactory {
                         shuffleMaster,
                         partitionTracker);
 
+        final CheckpointsCleaner checkpointsCleaner =
+                new CheckpointsCleaner(
+                        jobMasterConfiguration.getBoolean(
+                                CheckpointingOptions.CLEANER_PARALLEL_MODE));
+
         return new DefaultScheduler(
                 log,
                 jobGraph,
@@ -127,7 +136,7 @@ public class DefaultSchedulerFactory implements SchedulerNGFactory {
                 schedulerComponents.getStartUpAction(),
                 new ScheduledExecutorServiceAdapter(futureExecutor),
                 userCodeLoader,
-                new CheckpointsCleaner(),
+                checkpointsCleaner,
                 checkpointRecoveryFactory,
                 jobManagerJobMetricGroup,
                 schedulerComponents.getSchedulingStrategyFactory(),
@@ -146,6 +155,7 @@ public class DefaultSchedulerFactory implements SchedulerNGFactory {
                     }
                     jobStatusListener.jobStatusChanges(jobId, jobStatus, timestamp);
                 },
+                failureEnrichers,
                 executionGraphFactory,
                 shuffleMaster,
                 rpcTimeout,

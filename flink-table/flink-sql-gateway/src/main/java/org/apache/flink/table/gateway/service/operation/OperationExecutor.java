@@ -34,10 +34,8 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.CatalogNotExistException;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.EnvironmentSettings;
-import org.apache.flink.table.api.SqlDialect;
 import org.apache.flink.table.api.TableConfig;
 import org.apache.flink.table.api.TableException;
-import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.api.bridge.java.internal.StreamTableEnvironmentImpl;
 import org.apache.flink.table.api.internal.TableEnvironmentInternal;
 import org.apache.flink.table.api.internal.TableResultInternal;
@@ -62,11 +60,15 @@ import org.apache.flink.table.functions.FunctionIdentifier;
 import org.apache.flink.table.gateway.api.operation.OperationHandle;
 import org.apache.flink.table.gateway.api.results.FunctionInfo;
 import org.apache.flink.table.gateway.api.results.TableInfo;
+import org.apache.flink.table.gateway.environment.SqlGatewayStreamExecutionEnvironment;
 import org.apache.flink.table.gateway.service.context.SessionContext;
 import org.apache.flink.table.gateway.service.result.ResultFetcher;
 import org.apache.flink.table.gateway.service.utils.SqlExecutionException;
 import org.apache.flink.table.module.ModuleManager;
 import org.apache.flink.table.operations.BeginStatementSetOperation;
+import org.apache.flink.table.operations.CallProcedureOperation;
+import org.apache.flink.table.operations.CompileAndExecutePlanOperation;
+import org.apache.flink.table.operations.DeleteFromFilterOperation;
 import org.apache.flink.table.operations.EndStatementSetOperation;
 import org.apache.flink.table.operations.LoadModuleOperation;
 import org.apache.flink.table.operations.ModifyOperation;
@@ -76,6 +78,7 @@ import org.apache.flink.table.operations.StatementSetOperation;
 import org.apache.flink.table.operations.UnloadModuleOperation;
 import org.apache.flink.table.operations.UseOperation;
 import org.apache.flink.table.operations.command.AddJarOperation;
+import org.apache.flink.table.operations.command.ExecutePlanOperation;
 import org.apache.flink.table.operations.command.RemoveJarOperation;
 import org.apache.flink.table.operations.command.ResetOperation;
 import org.apache.flink.table.operations.command.SetOperation;
@@ -87,7 +90,6 @@ import org.apache.flink.table.operations.ddl.DropOperation;
 import org.apache.flink.table.resource.ResourceManager;
 import org.apache.flink.table.utils.DateTimeUtils;
 import org.apache.flink.util.CollectionUtil;
-import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.Preconditions;
 
@@ -189,9 +191,21 @@ public class OperationExecutor {
                             + "multiple 'INSERT INTO' statements wrapped in a 'STATEMENT SET' block.");
         }
         Operation op = parsedOperations.get(0);
-        return sessionContext.isStatementSetState()
-                ? executeOperationInStatementSetState(tableEnv, handle, op)
-                : executeOperation(tableEnv, handle, op);
+        if (op instanceof CallProcedureOperation) {
+            // if the operation is CallProcedureOperation, we need to set the stream environment
+            // context to it since the procedure will use the stream environment
+            try {
+                SqlGatewayStreamExecutionEnvironment.setAsContext(
+                        sessionContext.getUserClassloader());
+                return executeOperation(tableEnv, handle, op);
+            } finally {
+                SqlGatewayStreamExecutionEnvironment.unsetAsContext();
+            }
+        } else {
+            return sessionContext.isStatementSetState()
+                    ? executeOperationInStatementSetState(tableEnv, handle, op)
+                    : executeOperation(tableEnv, handle, op);
+        }
     }
 
     public String getCurrentCatalog() {
@@ -300,7 +314,6 @@ public class OperationExecutor {
 
     // --------------------------------------------------------------------------------------------
 
-    @VisibleForTesting
     public TableEnvironmentInternal getTableEnvironment() {
         // checks the value of RUNTIME_MODE
         Configuration operationConfig = sessionContext.getSessionConf().clone();
@@ -373,27 +386,16 @@ public class OperationExecutor {
                         catalogManager,
                         functionCatalog);
 
-        try {
-            return new StreamTableEnvironmentImpl(
-                    catalogManager,
-                    moduleManager,
-                    resourceManager,
-                    functionCatalog,
-                    tableConfig,
-                    env,
-                    planner,
-                    executor,
-                    settings.isStreamingMode());
-        } catch (ValidationException e) {
-            if (tableConfig.getSqlDialect() == SqlDialect.HIVE) {
-                String additionErrorMsg =
-                        "Note: if you want to use Hive dialect, "
-                                + "please first move the jar `flink-table-planner_2.12` located in `FLINK_HOME/opt` "
-                                + "to `FLINK_HOME/lib` and then move out the jar `flink-table-planner-loader` from `FLINK_HOME/lib`.";
-                ExceptionUtils.updateDetailMessage(e, t -> t.getMessage() + additionErrorMsg);
-            }
-            throw e;
-        }
+        return new StreamTableEnvironmentImpl(
+                catalogManager,
+                moduleManager,
+                resourceManager,
+                functionCatalog,
+                tableConfig,
+                env,
+                planner,
+                executor,
+                settings.isStreamingMode());
     }
 
     private ResultFetcher executeOperationInStatementSetState(
@@ -423,6 +425,9 @@ public class OperationExecutor {
         } else if (op instanceof ModifyOperation) {
             return callModifyOperations(
                     tableEnv, handle, Collections.singletonList((ModifyOperation) op));
+        } else if (op instanceof CompileAndExecutePlanOperation
+                || op instanceof ExecutePlanOperation) {
+            return callExecuteOperation(tableEnv, handle, op);
         } else if (op instanceof StatementSetOperation) {
             return callModifyOperations(
                     tableEnv, handle, ((StatementSetOperation) op).getOperations());
@@ -506,6 +511,23 @@ public class OperationExecutor {
             OperationHandle handle,
             List<ModifyOperation> modifyOperations) {
         TableResultInternal result = tableEnv.executeInternal(modifyOperations);
+        // DeleteFromFilterOperation doesn't have a JobClient
+        if (modifyOperations.size() == 1
+                && modifyOperations.get(0) instanceof DeleteFromFilterOperation) {
+            return ResultFetcher.fromTableResult(handle, result, false);
+        }
+
+        return fetchJobId(result, handle);
+    }
+
+    private ResultFetcher callExecuteOperation(
+            TableEnvironmentInternal tableEnv,
+            OperationHandle handle,
+            Operation executePlanOperation) {
+        return fetchJobId(tableEnv.executeInternal(executePlanOperation), handle);
+    }
+
+    private ResultFetcher fetchJobId(TableResultInternal result, OperationHandle handle) {
         JobID jobID =
                 result.getJobClient()
                         .orElseThrow(

@@ -20,6 +20,7 @@
 package org.apache.flink.test.checkpointing;
 
 import org.apache.flink.api.common.JobExecutionResult;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
@@ -29,7 +30,6 @@ import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
@@ -49,10 +49,11 @@ import org.junit.runners.Parameterized;
 
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.stream.Stream;
 
 import static org.apache.flink.api.common.eventtime.WatermarkStrategy.noWatermarks;
-import static org.apache.flink.shaded.guava30.com.google.common.collect.Iterables.getOnlyElement;
+import static org.apache.flink.shaded.guava31.com.google.common.collect.Iterables.getOnlyElement;
 import static org.apache.flink.test.checkpointing.UnalignedCheckpointTestBase.ChannelType.LOCAL;
 import static org.apache.flink.test.checkpointing.UnalignedCheckpointTestBase.ChannelType.MIXED;
 import static org.apache.flink.test.checkpointing.UnalignedCheckpointTestBase.ChannelType.REMOTE;
@@ -113,7 +114,8 @@ public class UnalignedCheckpointITCase extends UnalignedCheckpointTestBase {
                     StreamExecutionEnvironment env,
                     int minCheckpoints,
                     boolean slotSharing,
-                    int expectedRestarts) {
+                    int expectedRestarts,
+                    long sourceSleepMs) {
                 final int parallelism = env.getParallelism();
                 final SingleOutputStreamOperator<Long> stream =
                         env.fromSource(
@@ -121,7 +123,8 @@ public class UnalignedCheckpointITCase extends UnalignedCheckpointTestBase {
                                                 minCheckpoints,
                                                 parallelism,
                                                 expectedRestarts,
-                                                env.getCheckpointInterval()),
+                                                env.getCheckpointInterval(),
+                                                sourceSleepMs),
                                         noWatermarks(),
                                         "source")
                                 .slotSharingGroup(slotSharing ? "default" : "source")
@@ -144,7 +147,8 @@ public class UnalignedCheckpointITCase extends UnalignedCheckpointTestBase {
                     StreamExecutionEnvironment env,
                     int minCheckpoints,
                     boolean slotSharing,
-                    int expectedRestarts) {
+                    int expectedRestarts,
+                    long sourceSleepMs) {
                 final int parallelism = env.getParallelism();
                 DataStream<Long> combinedSource = null;
                 for (int inputIndex = 0; inputIndex < NUM_SOURCES; inputIndex++) {
@@ -154,7 +158,8 @@ public class UnalignedCheckpointITCase extends UnalignedCheckpointTestBase {
                                                     minCheckpoints,
                                                     parallelism,
                                                     expectedRestarts,
-                                                    env.getCheckpointInterval()),
+                                                    env.getCheckpointInterval(),
+                                                    sourceSleepMs),
                                             noWatermarks(),
                                             "source" + inputIndex)
                                     .slotSharingGroup(
@@ -182,7 +187,8 @@ public class UnalignedCheckpointITCase extends UnalignedCheckpointTestBase {
                     StreamExecutionEnvironment env,
                     int minCheckpoints,
                     boolean slotSharing,
-                    int expectedRestarts) {
+                    int expectedRestarts,
+                    long sourceSleepMs) {
                 final int parallelism = env.getParallelism();
                 DataStream<Tuple2<Integer, Long>> combinedSource = null;
                 for (int inputIndex = 0; inputIndex < NUM_SOURCES; inputIndex++) {
@@ -193,7 +199,8 @@ public class UnalignedCheckpointITCase extends UnalignedCheckpointTestBase {
                                                     minCheckpoints,
                                                     parallelism,
                                                     expectedRestarts,
-                                                    env.getCheckpointInterval()),
+                                                    env.getCheckpointInterval(),
+                                                    sourceSleepMs),
                                             noWatermarks(),
                                             "source" + inputIndex)
                                     .slotSharingGroup(
@@ -418,8 +425,8 @@ public class UnalignedCheckpointITCase extends UnalignedCheckpointTestBase {
         ValueState<Long> state;
 
         @Override
-        public void open(Configuration parameters) throws Exception {
-            super.open(parameters);
+        public void open(OpenContext openContext) throws Exception {
+            super.open(openContext);
             state =
                     getRuntimeContext()
                             .getState(
@@ -463,8 +470,7 @@ public class UnalignedCheckpointITCase extends UnalignedCheckpointTestBase {
 
         @Override
         public void snapshotState(FunctionSnapshotContext context) throws Exception {
-            stateList.clear();
-            stateList.add(state);
+            stateList.update(Collections.singletonList(state));
         }
 
         @Override

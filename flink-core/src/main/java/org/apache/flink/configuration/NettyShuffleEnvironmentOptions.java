@@ -28,6 +28,12 @@ import static org.apache.flink.configuration.ConfigOptions.key;
 @PublicEvolving
 public class NettyShuffleEnvironmentOptions {
 
+    private static final String HYBRID_SHUFFLE_NEW_MODE_OPTION_NAME =
+            "taskmanager.network.hybrid-shuffle.enable-new-mode";
+
+    private static final String HYBRID_SHUFFLE_REMOTE_STORAGE_BASE_PATH_OPTION_NAME =
+            "taskmanager.network.hybrid-shuffle.remote.path";
+
     // ------------------------------------------------------------------------
     //  Network General Options
     // ------------------------------------------------------------------------
@@ -48,12 +54,18 @@ public class NettyShuffleEnvironmentOptions {
                             "The task manager’s external port used for data exchange operations.");
 
     /** The local network port that the task manager listen at for data exchange. */
-    public static final ConfigOption<Integer> DATA_BIND_PORT =
+    @Documentation.Section({
+        Documentation.Sections.COMMON_HOST_PORT,
+        Documentation.Sections.ALL_TASK_MANAGER
+    })
+    public static final ConfigOption<String> DATA_BIND_PORT =
             key("taskmanager.data.bind-port")
-                    .intType()
+                    .stringType()
                     .noDefaultValue()
                     .withDescription(
-                            "The task manager's bind port used for data exchange operations. If not configured, '"
+                            "The task manager's bind port used for data exchange operations."
+                                    + " Also accepts a list of ports (“50100,50101”), ranges (“50100-50200”) or a combination of both."
+                                    + " If not configured, '"
                                     + DATA_PORT.key()
                                     + "' will be used.");
 
@@ -315,14 +327,19 @@ public class NettyShuffleEnvironmentOptions {
                                     // this raw value must be changed correspondingly
                                     "taskmanager.memory.framework.off-heap.batch-shuffle.size"));
 
-    /** Segment size of hybrid spilled file data index. */
+    /** Region group size of hybrid spilled file data index. */
     @Documentation.Section(Documentation.Sections.ALL_TASK_MANAGER_NETWORK)
-    public static final ConfigOption<Integer> HYBRID_SHUFFLE_SPILLED_INDEX_SEGMENT_SIZE =
-            key("taskmanager.network.hybrid-shuffle.spill-index-segment-size")
+    public static final ConfigOption<Integer> HYBRID_SHUFFLE_SPILLED_INDEX_REGION_GROUP_SIZE =
+            key("taskmanager.network.hybrid-shuffle.spill-index-region-group-size")
                     .intType()
                     .defaultValue(1024)
+                    .withDeprecatedKeys(
+                            "taskmanager.network.hybrid-shuffle.spill-index-segment-size")
                     .withDescription(
-                            "Controls the segment size(in bytes) of hybrid spilled file data index.");
+                            "Controls the region group size(in bytes) of hybrid spilled file data index. "
+                                    + "Note: This option will be ignored if "
+                                    + HYBRID_SHUFFLE_NEW_MODE_OPTION_NAME
+                                    + " is set true.");
 
     /** Max number of hybrid retained regions in memory. */
     @Documentation.Section(Documentation.Sections.ALL_TASK_MANAGER_NETWORK)
@@ -331,7 +348,10 @@ public class NettyShuffleEnvironmentOptions {
                     .longType()
                     .defaultValue(1024 * 1024L)
                     .withDescription(
-                            "Controls the max number of hybrid retained regions in memory.");
+                            "Controls the max number of hybrid retained regions in memory. "
+                                    + "Note: This option will be ignored if "
+                                    + HYBRID_SHUFFLE_NEW_MODE_OPTION_NAME
+                                    + " is set true. ");
 
     /** Number of max buffers can be used for each output subpartition. */
     @Documentation.Section(Documentation.Sections.ALL_TASK_MANAGER_NETWORK)
@@ -378,6 +398,38 @@ public class NettyShuffleEnvironmentOptions {
                                     + "the number of required buffers is not the same for local buffer pools, there may be deadlock cases that the upstream"
                                     + "tasks have occupied all the buffers and the downstream tasks are waiting for the exclusive buffers. The timeout breaks"
                                     + "the tie by failing the request of exclusive buffers and ask users to increase the number of total buffers.");
+
+    /** The option to enable the new mode of hybrid shuffle. */
+    @Documentation.Section(Documentation.Sections.ALL_TASK_MANAGER_NETWORK)
+    @Experimental
+    public static final ConfigOption<Boolean> NETWORK_HYBRID_SHUFFLE_ENABLE_NEW_MODE =
+            ConfigOptions.key(HYBRID_SHUFFLE_NEW_MODE_OPTION_NAME)
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "The option is used to enable the new mode of hybrid shuffle, which has resolved existing issues in the legacy mode. First, the new mode "
+                                    + "uses less required network memory. Second, the new mode can store shuffle data in remote storage when the disk space is not "
+                                    + "enough, which could avoid insufficient disk space errors and is only supported when "
+                                    + HYBRID_SHUFFLE_REMOTE_STORAGE_BASE_PATH_OPTION_NAME
+                                    + " is configured. The new mode is currently in an experimental phase. It can be set to false to fallback to the legacy mode "
+                                    + " if something unexpected. Once the new mode reaches a stable state, the legacy mode as well as the option will be removed.");
+
+    /** The option to configure the base remote storage path for hybrid shuffle. */
+    @Documentation.Section(Documentation.Sections.ALL_TASK_MANAGER_NETWORK)
+    @Experimental
+    public static final ConfigOption<String> NETWORK_HYBRID_SHUFFLE_REMOTE_STORAGE_BASE_PATH =
+            key(HYBRID_SHUFFLE_REMOTE_STORAGE_BASE_PATH_OPTION_NAME)
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "The option is used to configure the base path of remote storage for hybrid shuffle. The shuffle data will be stored in "
+                                    + "remote storage when the disk space is not enough. "
+                                    + "Note: If the option is configured and "
+                                    + HYBRID_SHUFFLE_NEW_MODE_OPTION_NAME
+                                    + " is false, this option will be ignored. "
+                                    + "If the option is not configured and "
+                                    + HYBRID_SHUFFLE_NEW_MODE_OPTION_NAME
+                                    + " is true, the remote storage will be disabled.");
 
     @Documentation.Section(Documentation.Sections.ALL_TASK_MANAGER_NETWORK)
     public static final ConfigOption<String> NETWORK_BLOCKING_SHUFFLE_TYPE =
@@ -490,6 +542,36 @@ public class NettyShuffleEnvironmentOptions {
                             "The Netty transport type, either \"nio\" or \"epoll\". The \"auto\" means selecting the property mode automatically"
                                     + " based on the platform. Note that the \"epoll\" mode can get better performance, less GC and have more advanced features which are"
                                     + " only available on modern Linux.");
+
+    @Documentation.Section(Documentation.Sections.ALL_TASK_MANAGER_NETWORK)
+    public static final ConfigOption<Integer> CLIENT_TCP_KEEP_IDLE_SECONDS =
+            key("taskmanager.network.netty.client.tcp.keepIdleSec")
+                    .intType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "The time (in seconds) the connection needs to remain idle before TCP starts sending keepalive probes. "
+                                    + "Note: This will not take effect when using netty transport type of nio with an older version of JDK 8, "
+                                    + "refer to https://bugs.openjdk.org/browse/JDK-8194298.");
+
+    @Documentation.Section(Documentation.Sections.ALL_TASK_MANAGER_NETWORK)
+    public static final ConfigOption<Integer> CLIENT_TCP_KEEP_INTERVAL_SECONDS =
+            key("taskmanager.network.netty.client.tcp.keepIntervalSec")
+                    .intType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "The time (in seconds) between individual keepalive probes. "
+                                    + "Note: This will not take effect when using netty transport type of nio with an older version of JDK 8, "
+                                    + "refer to https://bugs.openjdk.org/browse/JDK-8194298.");
+
+    @Documentation.Section(Documentation.Sections.ALL_TASK_MANAGER_NETWORK)
+    public static final ConfigOption<Integer> CLIENT_TCP_KEEP_COUNT =
+            key("taskmanager.network.netty.client.tcp.keepCount")
+                    .intType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "The maximum number of keepalive probes TCP should send before Netty client dropping the connection. "
+                                    + "Note: This will not take effect when using netty transport type of nio with an older version of JDK 8, "
+                                    + "refer to https://bugs.openjdk.org/browse/JDK-8194298.");
 
     // ------------------------------------------------------------------------
     //  Partition Request Options

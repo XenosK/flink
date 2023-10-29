@@ -38,7 +38,7 @@ under the License.
 连接器可以和多种多样的第三方系统进行交互。目前支持以下系统:
 
  * [Apache Kafka]({{< ref "docs/connectors/datastream/kafka" >}}) (source/sink)
- * [Apache Cassandra]({{< ref "docs/connectors/datastream/cassandra" >}}) (sink)
+ * [Apache Cassandra]({{< ref "docs/connectors/datastream/cassandra" >}}) (source/sink)
  * [Amazon DynamoDB]({{< ref "docs/connectors/datastream/dynamodb" >}}) (sink)
  * [Amazon Kinesis Data Streams]({{< ref "docs/connectors/datastream/kinesis" >}}) (source/sink)
  * [Amazon Kinesis Data Firehose]({{< ref "docs/connectors/datastream/firehose" >}}) (sink)
@@ -74,10 +74,5 @@ Flink 还有些一些额外的连接器通过 [Apache Bahir](https://bahir.apach
 使用connector并不是唯一可以使数据进入或者流出Flink的方式。
 一种常见的模式是从外部数据库或者 Web 服务查询数据得到初始数据流，然后通过 `Map` 或者 `FlatMap` 对初始数据流进行丰富和增强。
 Flink 提供了[异步 I/O]({{< ref "docs/dev/datastream/operators/asyncio" >}}) API 来让这个过程更加简单、高效和稳定。
-
-### 可查询状态
-
-当 Flink 应用程序需要向外部存储推送大量数据时会导致 I/O 瓶颈问题出现。在这种场景下，如果对数据的读操作远少于写操作，那么让外部应用从 Flink 拉取所需的数据会是一种更好的方式。
-[可查询状态]({{< ref "docs/dev/datastream/fault-tolerance/queryable_state" >}}) 接口可以实现这个功能，该接口允许被 Flink 托管的状态可以被按需查询。
 
 {{< top >}}

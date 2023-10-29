@@ -367,6 +367,31 @@ class CalcITCase extends StreamingTestBase {
   }
 
   @Test
+  def testIfFunction(): Unit = {
+    val testDataId = TestValuesTableFactory.registerData(TestData.data1)
+    val ddl =
+      s"""
+         |CREATE TABLE t (
+         |  a int,
+         |  b varchar,
+         |  c int
+         |) WITH (
+         |  'connector' = 'values',
+         |  'data-id' = '$testDataId',
+         |  'bounded' = 'true'
+         |)
+         |""".stripMargin
+    tEnv.executeSql(ddl)
+    val expected = List("false,1", "false,2", "false,3", "true,4", "true,5", "true,6")
+    val actual = tEnv
+      .executeSql("SELECT IF(a > 3, 'true', 'false'), a from t")
+      .collect()
+      .map(r => r.toString)
+      .toList
+    assertEquals(expected.sorted, actual.sorted)
+  }
+
+  @Test
   def testSourceWithCustomInternalData(): Unit = {
 
     def createMapData(k: Long, v: Long): MapData = {
@@ -616,6 +641,34 @@ class CalcITCase extends StreamingTestBase {
   }
 
   @Test
+  def testCurrentWatermarkWithoutAnyAttribute(): Unit = {
+    val tableId = TestValuesTableFactory.registerData(Seq())
+    tEnv.executeSql(s"""
+                       |CREATE TABLE T (
+                       |  ts TIMESTAMP_LTZ(3)
+                       |) WITH (
+                       |  'connector' = 'values',
+                       |  'data-id' = '$tableId',
+                       |  'bounded' = 'true'
+                       |)
+       """.stripMargin)
+
+    try {
+      tEnv.sqlQuery("SELECT ts, CURRENT_WATERMARK() FROM T")
+      fail("CURRENT_WATERMARK without any attribute should have failed.");
+    } catch {
+      case e: Exception =>
+        assertEquals(
+          "SQL validation failed. From line 1, column 12 to line 1, column 30: No match found for function signature CURRENT_WATERMARK().\n" +
+            "Supported signatures are:\n" +
+            "CURRENT_WATERMARK(<TIMESTAMP_WITHOUT_TIME_ZONE *ROWTIME*>)\n" +
+            "CURRENT_WATERMARK(<TIMESTAMP_WITH_LOCAL_TIME_ZONE *ROWTIME*>)",
+          e.getMessage
+        )
+    }
+  }
+
+  @Test
   def testCreateTemporaryTableFromDescriptor(): Unit = {
     val rows = Seq(row(42))
     val tableId = TestValuesTableFactory.registerData(rows)
@@ -742,6 +795,30 @@ class CalcITCase extends StreamingTestBase {
     env.execute()
 
     val expected = List("2,cbc\"ddd")
+    assertEquals(expected.sorted, sink.getAppendResults.sorted)
+  }
+
+  @Test
+  def testNonMergeableRandCall(): Unit = {
+    val t = env
+      .fromCollection(TestData.smallTupleData3)
+      .toTable(tEnv, 'a, 'b, 'c)
+    tEnv.createTemporaryView("SimpleTable", t)
+
+    val result = tEnv
+      .sqlQuery(s"""
+                   |SELECT b - a FROM (
+                   |  SELECT r + 5 AS a, r + 7 AS b FROM (
+                   |    SELECT RAND() AS r FROM SimpleTable
+                   |  ) t1
+                   |) t2
+                   |""".stripMargin)
+      .toAppendStream[Row]
+    val sink = new TestingAppendSink
+    result.addSink(sink)
+    env.execute()
+
+    val expected = List("2.0", "2.0", "2.0")
     assertEquals(expected.sorted, sink.getAppendResults.sorted)
   }
 }

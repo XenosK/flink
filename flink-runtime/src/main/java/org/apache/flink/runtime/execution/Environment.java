@@ -47,6 +47,7 @@ import org.apache.flink.runtime.state.CheckpointStorageAccess;
 import org.apache.flink.runtime.state.TaskStateManager;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.taskexecutor.GlobalAggregateManager;
+import org.apache.flink.runtime.taskmanager.TaskManagerActions;
 import org.apache.flink.runtime.taskmanager.TaskManagerRuntimeInfo;
 import org.apache.flink.util.UserCodeClassLoader;
 
@@ -187,7 +188,7 @@ public interface Environment {
     TaskKvStateRegistry getTaskKvStateRegistry();
 
     /**
-     * Confirms that the invokable has successfully completed all steps it needed to to for the
+     * Confirms that the invokable has successfully completed all steps it needed to for the
      * checkpoint with the give checkpoint-ID. This method does not include any state in the
      * checkpoint.
      *
@@ -240,6 +241,8 @@ public interface Environment {
     IndexedInputGate[] getAllInputGates();
 
     TaskEventDispatcher getTaskEventDispatcher();
+
+    TaskManagerActions getTaskManagerActions();
 
     // --------------------------------------------------------------------------------------------
     //  Fields set in the StreamTask to provide access to mailbox and other runtime resources

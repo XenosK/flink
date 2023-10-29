@@ -36,6 +36,7 @@ import org.apache.flink.runtime.shuffle.ShuffleEnvironment;
 import org.apache.flink.runtime.shuffle.ShuffleEnvironmentContext;
 import org.apache.flink.runtime.shuffle.ShuffleServiceLoader;
 import org.apache.flink.runtime.state.TaskExecutorChannelStateExecutorFactoryManager;
+import org.apache.flink.runtime.state.TaskExecutorFileMergingManager;
 import org.apache.flink.runtime.state.TaskExecutorLocalStateStoresManager;
 import org.apache.flink.runtime.state.TaskExecutorStateChangelogStoragesManager;
 import org.apache.flink.runtime.taskexecutor.slot.DefaultTimerService;
@@ -80,6 +81,7 @@ public class TaskManagerServices {
     private final JobTable jobTable;
     private final JobLeaderService jobLeaderService;
     private final TaskExecutorLocalStateStoresManager taskManagerStateStore;
+    private final TaskExecutorFileMergingManager taskManagerFileMergingManager;
     private final TaskExecutorStateChangelogStoragesManager taskManagerChangelogManager;
     private final TaskExecutorChannelStateExecutorFactoryManager taskManagerChannelStateManager;
     private final TaskEventDispatcher taskEventDispatcher;
@@ -87,6 +89,7 @@ public class TaskManagerServices {
     private final LibraryCacheManager libraryCacheManager;
     private final SlotAllocationSnapshotPersistenceService slotAllocationSnapshotPersistenceService;
     private final SharedResources sharedResources;
+    private final ShuffleDescriptorsCache shuffleDescriptorsCache;
 
     TaskManagerServices(
             UnresolvedTaskManagerLocation unresolvedTaskManagerLocation,
@@ -99,13 +102,15 @@ public class TaskManagerServices {
             JobTable jobTable,
             JobLeaderService jobLeaderService,
             TaskExecutorLocalStateStoresManager taskManagerStateStore,
+            TaskExecutorFileMergingManager taskManagerFileMergingManager,
             TaskExecutorStateChangelogStoragesManager taskManagerChangelogManager,
             TaskExecutorChannelStateExecutorFactoryManager taskManagerChannelStateManager,
             TaskEventDispatcher taskEventDispatcher,
             ExecutorService ioExecutor,
             LibraryCacheManager libraryCacheManager,
             SlotAllocationSnapshotPersistenceService slotAllocationSnapshotPersistenceService,
-            SharedResources sharedResources) {
+            SharedResources sharedResources,
+            ShuffleDescriptorsCache shuffleDescriptorsCache) {
 
         this.unresolvedTaskManagerLocation =
                 Preconditions.checkNotNull(unresolvedTaskManagerLocation);
@@ -118,6 +123,8 @@ public class TaskManagerServices {
         this.jobTable = Preconditions.checkNotNull(jobTable);
         this.jobLeaderService = Preconditions.checkNotNull(jobLeaderService);
         this.taskManagerStateStore = Preconditions.checkNotNull(taskManagerStateStore);
+        this.taskManagerFileMergingManager =
+                Preconditions.checkNotNull(taskManagerFileMergingManager);
         this.taskManagerChangelogManager = Preconditions.checkNotNull(taskManagerChangelogManager);
         this.taskManagerChannelStateManager = taskManagerChannelStateManager;
         this.taskEventDispatcher = Preconditions.checkNotNull(taskEventDispatcher);
@@ -125,6 +132,7 @@ public class TaskManagerServices {
         this.libraryCacheManager = Preconditions.checkNotNull(libraryCacheManager);
         this.slotAllocationSnapshotPersistenceService = slotAllocationSnapshotPersistenceService;
         this.sharedResources = Preconditions.checkNotNull(sharedResources);
+        this.shuffleDescriptorsCache = Preconditions.checkNotNull(shuffleDescriptorsCache);
     }
 
     // --------------------------------------------------------------------------------------------
@@ -171,6 +179,10 @@ public class TaskManagerServices {
         return taskManagerStateStore;
     }
 
+    public TaskExecutorFileMergingManager getTaskManagerFileMergingManager() {
+        return taskManagerFileMergingManager;
+    }
+
     public TaskExecutorStateChangelogStoragesManager getTaskManagerChangelogManager() {
         return taskManagerChangelogManager;
     }
@@ -193,6 +205,10 @@ public class TaskManagerServices {
 
     public SharedResources getSharedResources() {
         return sharedResources;
+    }
+
+    public ShuffleDescriptorsCache getShuffleDescriptorCache() {
+        return shuffleDescriptorsCache;
     }
 
     // --------------------------------------------------------------------------------------------
@@ -308,6 +324,10 @@ public class TaskManagerServices {
                         ioExecutor);
         final int listeningDataPort = shuffleEnvironment.start();
 
+        LOG.info(
+                "TaskManager data connection initialized successfully; listening internally on port: {}",
+                listeningDataPort);
+
         final KvStateService kvStateService =
                 KvStateService.fromConfiguration(taskManagerServicesConfiguration);
         kvStateService.start();
@@ -352,6 +372,9 @@ public class TaskManagerServices {
         final TaskExecutorChannelStateExecutorFactoryManager channelStateExecutorFactoryManager =
                 new TaskExecutorChannelStateExecutorFactoryManager();
 
+        final TaskExecutorFileMergingManager fileMergingManager =
+                new TaskExecutorFileMergingManager();
+
         final boolean failOnJvmMetaspaceOomError =
                 taskManagerServicesConfiguration
                         .getConfiguration()
@@ -368,7 +391,8 @@ public class TaskManagerServices {
                                 taskManagerServicesConfiguration
                                         .getAlwaysParentFirstLoaderPatterns(),
                                 failOnJvmMetaspaceOomError ? fatalErrorHandler : null,
-                                checkClassLoaderLeak));
+                                checkClassLoaderLeak),
+                        false);
 
         final SlotAllocationSnapshotPersistenceService slotAllocationSnapshotPersistenceService;
 
@@ -381,6 +405,9 @@ public class TaskManagerServices {
                     NoOpSlotAllocationSnapshotPersistenceService.INSTANCE;
         }
 
+        final ShuffleDescriptorsCache shuffleDescriptorsCache =
+                new DefaultShuffleDescriptorsCache.Factory().create();
+
         return new TaskManagerServices(
                 unresolvedTaskManagerLocation,
                 taskManagerServicesConfiguration.getManagedMemorySize().getBytes(),
@@ -392,13 +419,15 @@ public class TaskManagerServices {
                 jobTable,
                 jobLeaderService,
                 taskStateManager,
+                fileMergingManager,
                 changelogStoragesManager,
                 channelStateExecutorFactoryManager,
                 taskEventDispatcher,
                 ioExecutor,
                 libraryCacheManager,
                 slotAllocationSnapshotPersistenceService,
-                new SharedResources());
+                new SharedResources(),
+                shuffleDescriptorsCache);
     }
 
     private static TaskSlotTable<Task> createTaskSlotTable(

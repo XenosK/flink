@@ -56,7 +56,9 @@ public class SingleInputGateBenchmarkFactory extends SingleInputGateFactory {
                 connectionManager,
                 partitionManager,
                 taskEventPublisher,
-                networkBufferPool);
+                networkBufferPool,
+                null,
+                null);
     }
 
     @Override

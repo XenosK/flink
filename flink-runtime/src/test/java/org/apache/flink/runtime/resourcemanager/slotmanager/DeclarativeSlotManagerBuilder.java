@@ -39,12 +39,12 @@ public class DeclarativeSlotManagerBuilder {
     private boolean evenlySpreadOutSlots;
     private final ScheduledExecutor scheduledExecutor;
     private Time taskManagerRequestTimeout;
-    private Time slotRequestTimeout;
     private Time taskManagerTimeout;
     private boolean waitResultConsumedBeforeRelease;
     private WorkerResourceSpec defaultWorkerResourceSpec;
     private int numSlotsPerWorker;
     private SlotManagerMetricGroup slotManagerMetricGroup;
+    private int minSlotNum;
     private int maxSlotNum;
     private int redundantTaskManagerNum;
     private ResourceTracker resourceTracker;
@@ -56,13 +56,13 @@ public class DeclarativeSlotManagerBuilder {
         this.evenlySpreadOutSlots = false;
         this.scheduledExecutor = scheduledExecutor;
         this.taskManagerRequestTimeout = TestingUtils.infiniteTime();
-        this.slotRequestTimeout = TestingUtils.infiniteTime();
         this.taskManagerTimeout = TestingUtils.infiniteTime();
         this.waitResultConsumedBeforeRelease = true;
         this.defaultWorkerResourceSpec = WorkerResourceSpec.ZERO;
         this.numSlotsPerWorker = 1;
         this.slotManagerMetricGroup =
                 UnregisteredMetricGroups.createUnregisteredSlotManagerMetricGroup();
+        this.minSlotNum = ResourceManagerOptions.MIN_SLOT_NUM.defaultValue();
         this.maxSlotNum = ResourceManagerOptions.MAX_SLOT_NUM.defaultValue();
         this.redundantTaskManagerNum =
                 ResourceManagerOptions.REDUNDANT_TASK_MANAGER_NUM.defaultValue();
@@ -79,11 +79,6 @@ public class DeclarativeSlotManagerBuilder {
     public DeclarativeSlotManagerBuilder setTaskManagerRequestTimeout(
             Time taskManagerRequestTimeout) {
         this.taskManagerRequestTimeout = taskManagerRequestTimeout;
-        return this;
-    }
-
-    public DeclarativeSlotManagerBuilder setSlotRequestTimeout(Time slotRequestTimeout) {
-        this.slotRequestTimeout = slotRequestTimeout;
         return this;
     }
 
@@ -117,6 +112,11 @@ public class DeclarativeSlotManagerBuilder {
     public DeclarativeSlotManagerBuilder setSlotManagerMetricGroup(
             SlotManagerMetricGroup slotManagerMetricGroup) {
         this.slotManagerMetricGroup = slotManagerMetricGroup;
+        return this;
+    }
+
+    public DeclarativeSlotManagerBuilder setMinSlotNum(int minSlotNum) {
+        this.minSlotNum = minSlotNum;
         return this;
     }
 
@@ -155,7 +155,6 @@ public class DeclarativeSlotManagerBuilder {
         final SlotManagerConfiguration slotManagerConfiguration =
                 new SlotManagerConfiguration(
                         taskManagerRequestTimeout,
-                        slotRequestTimeout,
                         taskManagerTimeout,
                         requirementCheckDelay,
                         declareNeededResourceDelay,
@@ -166,8 +165,11 @@ public class DeclarativeSlotManagerBuilder {
                         evenlySpreadOutSlots,
                         defaultWorkerResourceSpec,
                         numSlotsPerWorker,
+                        minSlotNum,
                         maxSlotNum,
+                        new CPUResource(Double.MIN_VALUE),
                         new CPUResource(Double.MAX_VALUE),
+                        MemorySize.ZERO,
                         MemorySize.MAX_VALUE,
                         redundantTaskManagerNum);
 

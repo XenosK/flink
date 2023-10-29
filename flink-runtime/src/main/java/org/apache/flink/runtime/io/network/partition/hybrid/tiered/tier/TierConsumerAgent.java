@@ -18,5 +18,43 @@
 
 package org.apache.flink.runtime.io.network.partition.hybrid.tiered.tier;
 
-/** The consumer-side agent of a Tier. */
-public interface TierConsumerAgent {}
+import org.apache.flink.runtime.io.network.buffer.Buffer;
+import org.apache.flink.runtime.io.network.partition.hybrid.tiered.common.TieredStoragePartitionId;
+import org.apache.flink.runtime.io.network.partition.hybrid.tiered.common.TieredStorageSubpartitionId;
+import org.apache.flink.runtime.io.network.partition.hybrid.tiered.storage.AvailabilityNotifier;
+
+import java.io.IOException;
+import java.util.Optional;
+
+/**
+ * The {@link TierConsumerAgent} is the consumer agent of each tier in tiered store, which could
+ * read data from responding tier.
+ */
+public interface TierConsumerAgent {
+
+    /** Start the consumer agent. */
+    void start();
+
+    /**
+     * Get buffer from the consumer agent.
+     *
+     * @param partitionId the id of partition.
+     * @param subpartitionId the id of subpartition.
+     * @param segmentId the id of segment.
+     * @return buffer.
+     */
+    Optional<Buffer> getNextBuffer(
+            TieredStoragePartitionId partitionId,
+            TieredStorageSubpartitionId subpartitionId,
+            int segmentId);
+
+    /**
+     * Register the notifier to notify the availability of a subpartition.
+     *
+     * @param notifier to notify availability.
+     */
+    void registerAvailabilityNotifier(AvailabilityNotifier notifier);
+
+    /** Close the consumer agent. */
+    void close() throws IOException;
+}

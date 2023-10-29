@@ -28,7 +28,7 @@ import org.apache.flink.table.api.bridge.scala._
 import org.apache.flink.table.api.internal.TableEnvironmentInternal
 import org.apache.flink.table.planner.factories.TestValuesTableFactory
 import org.apache.flink.table.planner.factories.TestValuesTableFactory.{changelogRow, registerData}
-import org.apache.flink.table.planner.plan.utils.JavaUserDefinedAggFunctions.VarSumAggFunction
+import org.apache.flink.table.planner.plan.utils.JavaUserDefinedAggFunctions.{UserDefinedObjectUDAF, UserDefinedObjectUDAF2, VarSumAggFunction}
 import org.apache.flink.table.planner.runtime.batch.sql.agg.{MyPojoAggFunction, VarArgsAggFunction}
 import org.apache.flink.table.planner.runtime.utils._
 import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedAggFunctions.OverloadedMaxFunction
@@ -1360,6 +1360,34 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
   }
 
   @Test
+  def testUserDefinedObjectAgg(): Unit = {
+    tEnv.createTemporaryFunction("user_define_object", new UserDefinedObjectUDAF)
+    tEnv.createTemporaryFunction("user_define_object2", new UserDefinedObjectUDAF2)
+    val sqlQuery =
+      s"""
+         |select t1.a, user_define_object2(t1.d) from 
+         |(SELECT a, user_define_object(b) as d
+         |FROM MyTable GROUP BY a) t1
+         |group by t1.a
+         |""".stripMargin
+    val data = new mutable.MutableList[(Int, String)]
+    data.+=((1, "Sam"))
+    data.+=((1, "Jerry"))
+    data.+=((2, "Ali"))
+    data.+=((3, "Grace"))
+    data.+=((3, "Lucas"))
+
+    val t = failingDataSource(data).toTable(tEnv, 'a, 'b)
+    tEnv.createTemporaryView("MyTable", t)
+
+    val sink = new TestingRetractSink
+    tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink)
+    env.execute()
+    val expected = List("1,Jerry", "2,Ali", "3,Lucas")
+    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+  }
+
+  @Test
   def testSTDDEV(): Unit = {
     val sqlQuery = "SELECT STDDEV_SAMP(a), STDDEV_POP(a) FROM MyTable GROUP BY c"
 
@@ -1763,6 +1791,80 @@ class AggregateITCase(aggMode: AggMode, miniBatch: MiniBatchMode, backend: State
     tEnv.sqlQuery("select count(*) from src").toRetractStream[Row].addSink(sink).setParallelism(1)
     env.execute()
     val expected = List("3")
+    assertEquals(expected.sorted, sink.getRetractResults.sorted)
+  }
+
+  @Test
+  def testLagAggFunction(): Unit = {
+    val data =
+      List(rowOf(2L, 15, "Hello"), rowOf(8L, 11, "Hello world"), rowOf(9L, 12, "Hello world!"))
+    val dataId = TestValuesTableFactory.registerData(data)
+    tEnv.executeSql(s"""
+                       |CREATE TABLE src(
+                       |  `id` BIGINT,
+                       |  `len` INT NOT NULL,
+                       |  `content` STRING,
+                       |  `proctime` AS PROCTIME()
+                       |) WITH (
+                       |  'connector' = 'values',
+                       |  'data-id' = '$dataId'
+                       |)
+                       |""".stripMargin)
+    val sink = new TestingRetractSink
+    val sql =
+      s"""
+         |select
+         |  LAG(len, 1, cast(null as int)) OVER w AS prev_quantity,
+         |  LAG(len) OVER w AS prev_quantity
+         |from src
+         |WINDOW w AS (ORDER BY proctime)
+         |""".stripMargin
+    tEnv.sqlQuery(sql).toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+    val expected = List("null,null", "15,15", "11,11")
+    assertEquals(expected, sink.getRetractResults)
+  }
+
+  @Test
+  def testJsonArrayAggAndJsonObjectAggWithOtherAggs(): Unit = {
+    val sink = new TestingRetractSink
+    val sql =
+      s"""
+         |SELECT
+         |  MAX(d), JSON_OBJECTAGG(g VALUE d), JSON_ARRAYAGG(d), JSON_ARRAYAGG(g)
+         |FROM Table5 WHERE d <= 3
+         |""".stripMargin
+
+    val t = failingDataSource(TestData.tupleData5).toTable(tEnv, 'd, 'e, 'f, 'g, 'h)
+    tEnv.createTemporaryView("Table5", t)
+    tEnv.sqlQuery(sql).toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+    val expected =
+      List(
+        "3,{\"ABC\":3,\"BCD\":3,\"Hallo\":1,\"Hallo Welt\":2,\"Hallo Welt wie\":2,\"Hallo Welt wie gehts?\":3}," +
+          "[1,2,2,3,3,3],[\"Hallo\",\"Hallo Welt\",\"Hallo Welt wie\",\"Hallo Welt wie gehts?\",\"ABC\",\"BCD\"]")
+    assertEquals(expected, sink.getRetractResults)
+  }
+
+  @Test
+  def testGroupJsonArrayAggAndJsonObjectAggWithOtherAggs(): Unit = {
+    val sink = new TestingRetractSink
+    val sql =
+      s"""
+         |SELECT
+         |  d, JSON_OBJECTAGG(g VALUE f), JSON_ARRAYAGG(g), JSON_ARRAYAGG(f), max(f)
+         |FROM Table5 WHERE d <= 3 GROUP BY d
+         |""".stripMargin
+    val t = failingDataSource(TestData.tupleData5).toTable(tEnv, 'd, 'e, 'f, 'g, 'h)
+    tEnv.createTemporaryView("Table5", t)
+    tEnv.sqlQuery(sql).toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+    val expected =
+      List(
+        "3,{\"ABC\":4,\"BCD\":5,\"Hallo Welt wie gehts?\":3},[\"Hallo Welt wie gehts?\",\"ABC\",\"BCD\"],[3,4,5],5",
+        "1,{\"Hallo\":0},[\"Hallo\"],[0],0",
+        "2,{\"Hallo Welt\":1,\"Hallo Welt wie\":2},[\"Hallo Welt\",\"Hallo Welt wie\"],[1,2],2"
+      )
     assertEquals(expected.sorted, sink.getRetractResults.sorted)
   }
 }

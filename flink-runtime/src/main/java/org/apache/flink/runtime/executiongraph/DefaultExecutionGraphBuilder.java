@@ -42,6 +42,7 @@ import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.jsonplan.JsonPlanGenerator;
 import org.apache.flink.runtime.jobgraph.tasks.CheckpointCoordinatorConfiguration;
 import org.apache.flink.runtime.jobgraph.tasks.JobCheckpointingSettings;
+import org.apache.flink.runtime.metrics.groups.JobManagerJobMetricGroup;
 import org.apache.flink.runtime.scheduler.VertexParallelismStore;
 import org.apache.flink.runtime.shuffle.ShuffleMaster;
 import org.apache.flink.runtime.state.CheckpointStorage;
@@ -94,7 +95,8 @@ public class DefaultExecutionGraphBuilder {
             boolean isDynamicGraph,
             ExecutionJobVertex.Factory executionJobVertexFactory,
             MarkPartitionFinishedStrategy markPartitionFinishedStrategy,
-            boolean nonFinishedHybridPartitionShouldBeUnknown)
+            boolean nonFinishedHybridPartitionShouldBeUnknown,
+            JobManagerJobMetricGroup jobManagerJobMetricGroup)
             throws JobExecutionException, JobException {
 
         checkNotNull(jobGraph, "job graph cannot be null");
@@ -118,35 +120,47 @@ public class DefaultExecutionGraphBuilder {
                 PartitionGroupReleaseStrategyFactoryLoader.loadPartitionGroupReleaseStrategyFactory(
                         jobManagerConfig);
 
-        // create a new execution graph, if none exists so far
-        final DefaultExecutionGraph executionGraph;
+        final int offloadShuffleDescriptorsThreshold =
+                jobManagerConfig.get(
+                        TaskDeploymentDescriptorFactory.OFFLOAD_SHUFFLE_DESCRIPTORS_THRESHOLD);
+
+        final TaskDeploymentDescriptorFactory taskDeploymentDescriptorFactory;
         try {
-            executionGraph =
-                    new DefaultExecutionGraph(
-                            jobInformation,
-                            futureExecutor,
-                            ioExecutor,
-                            rpcTimeout,
-                            executionHistorySizeLimit,
-                            classLoader,
-                            blobWriter,
-                            partitionGroupReleaseStrategyFactory,
-                            shuffleMaster,
-                            partitionTracker,
+            taskDeploymentDescriptorFactory =
+                    new TaskDeploymentDescriptorFactory(
+                            BlobWriter.serializeAndTryOffload(jobInformation, jobId, blobWriter),
+                            jobId,
                             partitionLocationConstraint,
-                            executionDeploymentListener,
-                            executionStateUpdateListener,
-                            initializationTimestamp,
-                            vertexAttemptNumberStore,
-                            vertexParallelismStore,
-                            isDynamicGraph,
-                            executionJobVertexFactory,
-                            jobGraph.getJobStatusHooks(),
-                            markPartitionFinishedStrategy,
-                            nonFinishedHybridPartitionShouldBeUnknown);
+                            blobWriter,
+                            nonFinishedHybridPartitionShouldBeUnknown,
+                            offloadShuffleDescriptorsThreshold);
         } catch (IOException e) {
-            throw new JobException("Could not create the ExecutionGraph.", e);
+            throw new JobException("Could not create the TaskDeploymentDescriptorFactory.", e);
         }
+
+        // create a new execution graph, if none exists so far
+        final DefaultExecutionGraph executionGraph =
+                new DefaultExecutionGraph(
+                        jobInformation,
+                        futureExecutor,
+                        ioExecutor,
+                        rpcTimeout,
+                        executionHistorySizeLimit,
+                        classLoader,
+                        blobWriter,
+                        partitionGroupReleaseStrategyFactory,
+                        shuffleMaster,
+                        partitionTracker,
+                        executionDeploymentListener,
+                        executionStateUpdateListener,
+                        initializationTimestamp,
+                        vertexAttemptNumberStore,
+                        vertexParallelismStore,
+                        isDynamicGraph,
+                        executionJobVertexFactory,
+                        jobGraph.getJobStatusHooks(),
+                        markPartitionFinishedStrategy,
+                        taskDeploymentDescriptorFactory);
 
         // set the basic properties
 
@@ -204,7 +218,7 @@ public class DefaultExecutionGraphBuilder {
                     jobName,
                     jobId);
         }
-        executionGraph.attachJobGraph(sortedTopology);
+        executionGraph.attachJobGraph(sortedTopology, jobManagerJobMetricGroup);
 
         if (log.isDebugEnabled()) {
             log.debug(

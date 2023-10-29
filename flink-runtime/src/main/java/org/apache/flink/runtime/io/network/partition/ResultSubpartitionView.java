@@ -65,6 +65,13 @@ public interface ResultSubpartitionView {
      */
     Throwable getFailureCause();
 
+    /**
+     * Get the availability and backlog of the view. The availability represents if the view is
+     * ready to get buffer from it. The backlog represents the number of available data buffers.
+     *
+     * @param numCreditsAvailable the available credits for this {@link ResultSubpartitionView}.
+     * @return availability and backlog.
+     */
     AvailabilityWithBacklog getAvailabilityAndBacklog(int numCreditsAvailable);
 
     int unsynchronizedGetNumberOfQueuedBuffers();
@@ -72,6 +79,14 @@ public interface ResultSubpartitionView {
     int getNumberOfQueuedBuffers();
 
     void notifyNewBufferSize(int newBufferSize);
+
+    /**
+     * In tiered storage shuffle mode, only required segments will be sent to prevent the redundant
+     * buffer usage. Downstream will notify the upstream by this method to send required segments.
+     *
+     * @param segmentId segment id is the id indicating the required id.
+     */
+    default void notifyRequiredSegmentId(int segmentId) {}
 
     /**
      * Availability of the {@link ResultSubpartitionView} and the backlog in the corresponding

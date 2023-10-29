@@ -28,6 +28,8 @@ import org.apache.flink.configuration.SchedulerExecutionMode;
 import org.apache.flink.configuration.WebOptions;
 import org.apache.flink.core.execution.CheckpointType;
 import org.apache.flink.core.execution.SavepointFormatType;
+import org.apache.flink.core.failure.FailureEnricher;
+import org.apache.flink.core.failure.FailureEnricher.Context;
 import org.apache.flink.queryablestate.KvStateID;
 import org.apache.flink.runtime.JobException;
 import org.apache.flink.runtime.accumulators.AccumulatorSnapshot;
@@ -37,6 +39,7 @@ import org.apache.flink.runtime.checkpoint.CheckpointIDCounter;
 import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
 import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
 import org.apache.flink.runtime.checkpoint.CheckpointScheduling;
+import org.apache.flink.runtime.checkpoint.CheckpointStatsSnapshot;
 import org.apache.flink.runtime.checkpoint.CheckpointsCleaner;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpoint;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpointStore;
@@ -57,6 +60,8 @@ import org.apache.flink.runtime.executiongraph.MutableVertexAttemptNumberStore;
 import org.apache.flink.runtime.executiongraph.TaskExecutionStateTransition;
 import org.apache.flink.runtime.executiongraph.failover.flip1.ExecutionFailureHandler;
 import org.apache.flink.runtime.executiongraph.failover.flip1.RestartBackoffTimeStrategy;
+import org.apache.flink.runtime.failure.DefaultFailureEnricherContext;
+import org.apache.flink.runtime.failure.FailureEnricherUtils;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
 import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.jobgraph.JobEdge;
@@ -103,6 +108,7 @@ import org.apache.flink.runtime.scheduler.adaptive.allocator.ReservedSlots;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.SlotAllocator;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.VertexParallelism;
 import org.apache.flink.runtime.scheduler.adaptive.scalingpolicy.EnforceMinimalIncreaseRescalingController;
+import org.apache.flink.runtime.scheduler.adaptive.scalingpolicy.EnforceParallelismChangeRescalingController;
 import org.apache.flink.runtime.scheduler.adaptive.scalingpolicy.RescalingController;
 import org.apache.flink.runtime.scheduler.exceptionhistory.ExceptionHistoryEntry;
 import org.apache.flink.runtime.scheduler.exceptionhistory.RootExceptionHistoryEntry;
@@ -131,6 +137,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -190,12 +197,15 @@ public class AdaptiveScheduler
 
     private final ComponentMainThreadExecutor componentMainThreadExecutor;
     private final FatalErrorHandler fatalErrorHandler;
+    private final Collection<FailureEnricher> failureEnrichers;
 
     private final Collection<JobStatusListener> jobStatusListeners;
 
     private final SlotAllocator slotAllocator;
 
     private final RescalingController rescalingController;
+
+    private final RescalingController forceRescalingController;
 
     private final Duration initialResourceAllocationTimeout;
 
@@ -244,6 +254,7 @@ public class AdaptiveScheduler
             ComponentMainThreadExecutor mainThreadExecutor,
             FatalErrorHandler fatalErrorHandler,
             JobStatusListener jobStatusListener,
+            Collection<FailureEnricher> failureEnrichers,
             ExecutionGraphFactory executionGraphFactory)
             throws JobExecutionException {
 
@@ -286,6 +297,8 @@ public class AdaptiveScheduler
 
         this.rescalingController = new EnforceMinimalIncreaseRescalingController(configuration);
 
+        this.forceRescalingController = new EnforceParallelismChangeRescalingController();
+
         this.initialResourceAllocationTimeout = initialResourceAllocationTimeout;
 
         this.resourceStabilizationTimeout = resourceStabilizationTimeout;
@@ -313,6 +326,7 @@ public class AdaptiveScheduler
                 jobStatusMetricsSettings);
 
         jobStatusListeners = Collections.unmodifiableCollection(tmpJobStatusListeners);
+        this.failureEnrichers = failureEnrichers;
         this.exceptionHistory =
                 new BoundedFIFOQueue<>(
                         configuration.getInteger(WebOptions.MAX_EXCEPTION_HISTORY_SIZE));
@@ -512,7 +526,35 @@ public class AdaptiveScheduler
 
     @Override
     public void handleGlobalFailure(Throwable cause) {
-        state.handleGlobalFailure(cause);
+        final FailureEnricher.Context ctx =
+                DefaultFailureEnricherContext.forGlobalFailure(
+                        jobInformation.getJobID(),
+                        jobInformation.getName(),
+                        jobManagerJobMetricGroup,
+                        ioExecutor,
+                        userCodeClassLoader);
+        final CompletableFuture<Map<String, String>> failureLabels =
+                FailureEnricherUtils.labelFailure(
+                        cause, ctx, getMainThreadExecutor(), failureEnrichers);
+        state.handleGlobalFailure(cause, failureLabels);
+    }
+
+    private CompletableFuture<Map<String, String>> labelFailure(
+            final TaskExecutionStateTransition taskExecutionStateTransition) {
+        if (taskExecutionStateTransition.getExecutionState() == ExecutionState.FAILED
+                && !failureEnrichers.isEmpty()) {
+            final Throwable cause = taskExecutionStateTransition.getError(userCodeClassLoader);
+            final Context ctx =
+                    DefaultFailureEnricherContext.forTaskFailure(
+                            jobGraph.getJobID(),
+                            jobGraph.getName(),
+                            jobManagerJobMetricGroup,
+                            ioExecutor,
+                            userCodeClassLoader);
+            return FailureEnricherUtils.labelFailure(
+                    cause, ctx, getMainThreadExecutor(), failureEnrichers);
+        }
+        return FailureEnricherUtils.EMPTY_FAILURE_LABELS;
     }
 
     @Override
@@ -521,7 +563,7 @@ public class AdaptiveScheduler
                         StateWithExecutionGraph.class,
                         stateWithExecutionGraph ->
                                 stateWithExecutionGraph.updateTaskExecutionState(
-                                        taskExecutionState),
+                                        taskExecutionState, labelFailure(taskExecutionState)),
                         "updateTaskExecutionState")
                 .orElse(false);
     }
@@ -555,6 +597,11 @@ public class AdaptiveScheduler
     @Override
     public ExecutionGraphInfo requestJob() {
         return new ExecutionGraphInfo(state.getJob(), exceptionHistory.toArrayList());
+    }
+
+    @Override
+    public CheckpointStatsSnapshot requestCheckpointStats() {
+        return state.getJob().getCheckpointStatsSnapshot();
     }
 
     @Override
@@ -681,6 +728,15 @@ public class AdaptiveScheduler
     }
 
     @Override
+    public void notifyEndOfData(ExecutionAttemptID executionAttemptID) {
+        state.tryRun(
+                StateWithExecutionGraph.class,
+                stateWithExecutionGraph ->
+                        stateWithExecutionGraph.notifyEndOfData(executionAttemptID),
+                "notifyEndOfData");
+    }
+
+    @Override
     public void reportCheckpointMetrics(
             JobID jobID,
             ExecutionAttemptID executionAttemptID,
@@ -753,7 +809,8 @@ public class AdaptiveScheduler
     public JobResourceRequirements requestJobResourceRequirements() {
         final JobResourceRequirements.Builder builder = JobResourceRequirements.newBuilder();
         for (JobInformation.VertexInformation vertex : jobInformation.getVertices()) {
-            builder.setParallelismForJobVertex(vertex.getJobVertexID(), 1, vertex.getParallelism());
+            builder.setParallelismForJobVertex(
+                    vertex.getJobVertexID(), vertex.getMinParallelism(), vertex.getParallelism());
         }
         return builder.build();
     }
@@ -783,7 +840,7 @@ public class AdaptiveScheduler
     @Override
     public boolean hasDesiredResources() {
         final Collection<? extends SlotInfo> freeSlots =
-                declarativeSlotPool.getFreeSlotsInformation();
+                declarativeSlotPool.getFreeSlotInfoTracker().getFreeSlotsInformation();
         return hasDesiredResources(desiredResources, freeSlots);
     }
 
@@ -821,7 +878,7 @@ public class AdaptiveScheduler
         return slotAllocator
                 .determineParallelismAndCalculateAssignment(
                         jobInformation,
-                        declarativeSlotPool.getFreeSlotsInformation(),
+                        declarativeSlotPool.getFreeSlotInfoTracker().getFreeSlotsInformation(),
                         JobAllocationsInformation.fromGraph(previousExecutionGraph))
                 .orElseThrow(
                         () ->
@@ -1110,16 +1167,24 @@ public class AdaptiveScheduler
                 LOG);
     }
 
+    /**
+     * In regular mode, rescale the job if added resource meets {@link
+     * JobManagerOptions#MIN_PARALLELISM_INCREASE}. In force mode rescale if the parallelism has
+     * changed.
+     */
     @Override
-    public boolean shouldRescale(ExecutionGraph executionGraph) {
+    public boolean shouldRescale(ExecutionGraph executionGraph, boolean forceRescale) {
         final Optional<VertexParallelism> maybeNewParallelism =
                 slotAllocator.determineParallelism(
                         jobInformation, declarativeSlotPool.getAllSlotsInformation());
         return maybeNewParallelism
                 .filter(
-                        vertexParallelism ->
-                                rescalingController.shouldRescale(
-                                        getCurrentParallelism(executionGraph), vertexParallelism))
+                        vertexParallelism -> {
+                            RescalingController rescalingControllerToUse =
+                                    forceRescale ? forceRescalingController : rescalingController;
+                            return rescalingControllerToUse.shouldRescale(
+                                    getCurrentParallelism(executionGraph), vertexParallelism);
+                        })
                 .isPresent();
     }
 

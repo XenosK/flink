@@ -47,17 +47,18 @@ import org.apache.flink.runtime.executiongraph.ExecutionVertex;
 import org.apache.flink.runtime.executiongraph.IntermediateResult;
 import org.apache.flink.runtime.executiongraph.IntermediateResultPartition;
 import org.apache.flink.runtime.executiongraph.InternalExecutionGraphAccessor;
-import org.apache.flink.runtime.executiongraph.JobInformation;
 import org.apache.flink.runtime.executiongraph.JobVertexInputInfo;
 import org.apache.flink.runtime.executiongraph.MarkPartitionFinishedStrategy;
 import org.apache.flink.runtime.executiongraph.TaskExecutionStateTransition;
 import org.apache.flink.runtime.executiongraph.TestingDefaultExecutionGraphBuilder;
 import org.apache.flink.runtime.executiongraph.failover.flip1.partitionrelease.PartitionGroupReleaseStrategy;
+import org.apache.flink.runtime.failure.FailureEnricherUtils;
 import org.apache.flink.runtime.io.network.partition.JobMasterPartitionTracker;
 import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.jobgraph.IntermediateResultPartitionID;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.metrics.groups.UnregisteredMetricGroups;
 import org.apache.flink.runtime.operators.coordination.CoordinatorStoreImpl;
 import org.apache.flink.runtime.scheduler.DefaultVertexParallelismInfo;
 import org.apache.flink.runtime.scheduler.ExecutionGraphHandler;
@@ -71,8 +72,6 @@ import org.apache.flink.runtime.shuffle.ShuffleMaster;
 import org.apache.flink.runtime.taskmanager.TaskExecutionState;
 import org.apache.flink.testutils.TestingUtils;
 import org.apache.flink.testutils.executor.TestExecutorResource;
-import org.apache.flink.types.Either;
-import org.apache.flink.util.SerializedValue;
 import org.apache.flink.util.TestLogger;
 
 import org.junit.ClassRule;
@@ -83,9 +82,11 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -146,7 +147,10 @@ public class ExecutingTest extends TestLogger {
                     log,
                     ctx,
                     ClassLoader.getSystemClassLoader(),
-                    new ArrayList<>());
+                    new ArrayList<>(),
+                    Duration.ZERO,
+                    null,
+                    Instant.now());
             assertThat(mockExecutionVertex.isDeployCalled(), is(false));
         }
     }
@@ -164,7 +168,10 @@ public class ExecutingTest extends TestLogger {
                     log,
                     ctx,
                     ClassLoader.getSystemClassLoader(),
-                    new ArrayList<>());
+                    new ArrayList<>(),
+                    Duration.ZERO,
+                    null,
+                    Instant.now());
         }
     }
 
@@ -195,7 +202,8 @@ public class ExecutingTest extends TestLogger {
                         assertThat(failingArguments.getFailureCause().getMessage(), is(failureMsg));
                     }));
             ctx.setHowToHandleFailure(FailureResult::canNotRestart);
-            exec.handleGlobalFailure(new RuntimeException(failureMsg));
+            exec.handleGlobalFailure(
+                    new RuntimeException(failureMsg), FailureEnricherUtils.EMPTY_FAILURE_LABELS);
         }
     }
 
@@ -208,7 +216,9 @@ public class ExecutingTest extends TestLogger {
                     (restartingArguments ->
                             assertThat(restartingArguments.getBackoffTime(), is(duration))));
             ctx.setHowToHandleFailure((f) -> FailureResult.canRestart(f, duration));
-            exec.handleGlobalFailure(new RuntimeException("Recoverable error"));
+            exec.handleGlobalFailure(
+                    new RuntimeException("Recoverable error"),
+                    FailureEnricherUtils.EMPTY_FAILURE_LABELS);
         }
     }
 
@@ -249,28 +259,121 @@ public class ExecutingTest extends TestLogger {
     }
 
     @Test
-    public void testNotifyNewResourcesAvailableWithCanScaleUpTransitionsToRestarting()
+    public void testNotifyNewResourcesAvailableBeforeCooldownIsOverScheduledStateChange()
             throws Exception {
         try (MockExecutingContext ctx = new MockExecutingContext()) {
-            Executing exec = new ExecutingStateBuilder().build(ctx);
-
+            // do not wait too long in the test
+            final Duration scalingIntervalMin = Duration.ofSeconds(1L);
+            final ExecutingStateBuilder executingStateBuilder =
+                    new ExecutingStateBuilder().setScalingIntervalMin(scalingIntervalMin);
+            Executing exec = executingStateBuilder.build(ctx);
+            // => rescale
+            ctx.setCanScaleUp(true);
+            // scheduled rescale should restart the job after cooldown
             ctx.setExpectRestarting(
                     restartingArguments -> {
-                        // expect immediate restart on scale up
                         assertThat(restartingArguments.getBackoffTime(), is(Duration.ZERO));
+                        assertThat(ctx.actionWasScheduled, is(true));
                     });
-            ctx.setCanScaleUp(() -> true);
             exec.onNewResourcesAvailable();
         }
     }
 
     @Test
-    public void testNotifyNewResourcesAvailableWithNoResourcesAndNoStateChange() throws Exception {
+    public void testNotifyNewResourcesAvailableAfterCooldownIsOverStateChange() throws Exception {
+        try (MockExecutingContext ctx = new MockExecutingContext()) {
+            final ExecutingStateBuilder executingStateBuilder =
+                    new ExecutingStateBuilder()
+                            .setScalingIntervalMin(Duration.ofSeconds(20L))
+                            .setLastRescale(Instant.now().minus(Duration.ofSeconds(30L)));
+            Executing exec = executingStateBuilder.build(ctx);
+            // => rescale
+            ctx.setCanScaleUp(true);
+            // immediate rescale
+            ctx.setExpectRestarting(
+                    restartingArguments -> {
+                        assertThat(restartingArguments.getBackoffTime(), is(Duration.ZERO));
+                        assertThat(ctx.actionWasScheduled, is(false));
+                    });
+            exec.onNewResourcesAvailable();
+        }
+    }
+
+    @Test
+    public void testNotifyNewResourcesAvailableWithCanScaleUpWithoutForceTransitionsToRestarting()
+            throws Exception {
         try (MockExecutingContext ctx = new MockExecutingContext()) {
             Executing exec = new ExecutingStateBuilder().build(ctx);
-            ctx.setCanScaleUp(() -> false);
+
+            ctx.setExpectRestarting(
+                    // immediate rescale
+                    restartingArguments -> {
+                        assertThat(restartingArguments.getBackoffTime(), is(Duration.ZERO));
+                        assertThat(ctx.actionWasScheduled, is(false));
+                    });
+            ctx.setCanScaleUp(true); // => rescale
+            exec.onNewResourcesAvailable();
+        }
+    }
+
+    @Test
+    public void testNotifyNewResourcesAvailableWithCantScaleUpWithoutForceAndCantScaleUpWithForce()
+            throws Exception {
+        try (MockExecutingContext ctx = new MockExecutingContext()) {
+            Executing exec =
+                    new ExecutingStateBuilder()
+                            .setScalingIntervalMax(Duration.ofSeconds(1L))
+                            .build(ctx);
+            // => schedule force rescale but resource lost on timeout => no rescale
+            ctx.setCanScaleUp(false, false);
             exec.onNewResourcesAvailable();
             ctx.assertNoStateTransition();
+            assertThat(ctx.actionWasScheduled, is(true));
+        }
+    }
+
+    @Test
+    public void
+            testNotifyNewResourcesAvailableWithCantScaleUpWithoutForceAndCanScaleUpWithForceScheduled()
+                    throws Exception {
+        try (MockExecutingContext ctx = new MockExecutingContext()) {
+            final ExecutingStateBuilder executingStateBuilder =
+                    new ExecutingStateBuilder()
+                            .setScalingIntervalMin(Duration.ofSeconds(20L))
+                            .setScalingIntervalMax(Duration.ofSeconds(30L))
+                            .setLastRescale(Instant.now().minus(Duration.ofSeconds(25L)));
+            Executing exec = executingStateBuilder.build(ctx);
+            // => schedule force rescale and resource still there after timeout => rescale
+            ctx.setCanScaleUp(false, true);
+            // rescale after scaling-interval.max
+            ctx.setExpectRestarting(
+                    restartingArguments -> {
+                        assertThat(restartingArguments.getBackoffTime(), is(Duration.ZERO));
+                        assertThat(ctx.actionWasScheduled, is(true));
+                    });
+            exec.onNewResourcesAvailable();
+        }
+    }
+
+    @Test
+    public void
+            testNotifyNewResourcesAvailableWithCantScaleUpWithoutForceAndCanScaleUpWithForceImmediate()
+                    throws Exception {
+        try (MockExecutingContext ctx = new MockExecutingContext()) {
+            final ExecutingStateBuilder executingStateBuilder =
+                    new ExecutingStateBuilder()
+                            .setScalingIntervalMin(Duration.ofSeconds(20L))
+                            .setScalingIntervalMax(Duration.ofSeconds(30L))
+                            .setLastRescale(Instant.now().minus(Duration.ofSeconds(70L)));
+            Executing exec = executingStateBuilder.build(ctx);
+            // => immediate force rescale and resource still there after timeout => rescale
+            ctx.setCanScaleUp(false, true);
+            ctx.setExpectRestarting(
+                    restartingArguments -> {
+                        assertThat(restartingArguments.getBackoffTime(), is(Duration.ZERO));
+                        assertThat(ctx.actionWasScheduled, is(false));
+                    });
+            exec.onNewResourcesAvailable();
         }
     }
 
@@ -297,7 +400,8 @@ public class ExecutingTest extends TestLogger {
             returnsFailedStateExecutionGraph.registerExecution(execution);
             TaskExecutionStateTransition taskExecutionStateTransition =
                     createFailingStateTransition(execution.getAttemptId(), exception);
-            exec.updateTaskExecutionState(taskExecutionStateTransition);
+            exec.updateTaskExecutionState(
+                    taskExecutionStateTransition, FailureEnricherUtils.EMPTY_FAILURE_LABELS);
         }
     }
 
@@ -323,7 +427,8 @@ public class ExecutingTest extends TestLogger {
             returnsFailedStateExecutionGraph.registerExecution(execution);
             TaskExecutionStateTransition taskExecutionStateTransition =
                     createFailingStateTransition(execution.getAttemptId(), exception);
-            exec.updateTaskExecutionState(taskExecutionStateTransition);
+            exec.updateTaskExecutionState(
+                    taskExecutionStateTransition, FailureEnricherUtils.EMPTY_FAILURE_LABELS);
         }
     }
 
@@ -346,7 +451,8 @@ public class ExecutingTest extends TestLogger {
             returnsFailedStateExecutionGraph.registerExecution(execution);
             TaskExecutionStateTransition taskExecutionStateTransition =
                     createFailingStateTransition(execution.getAttemptId(), exception);
-            exec.updateTaskExecutionState(taskExecutionStateTransition);
+            exec.updateTaskExecutionState(
+                    taskExecutionStateTransition, FailureEnricherUtils.EMPTY_FAILURE_LABELS);
 
             ctx.assertNoStateTransition();
         }
@@ -462,15 +568,15 @@ public class ExecutingTest extends TestLogger {
 
     @Test
     public void testExecutingChecksForNewResourcesWhenBeingCreated() throws Exception {
-        try (MockExecutingContext context = new MockExecutingContext()) {
-            context.setCanScaleUp(() -> true);
-            context.setExpectRestarting(
-                    restartingArguments -> {
-                        // expect immediate restart on scale up
+        try (MockExecutingContext ctx = new MockExecutingContext()) {
+            ctx.setCanScaleUp(true);
+            ctx.setExpectRestarting(
+                    restartingArguments -> { // immediate rescale
                         assertThat(restartingArguments.getBackoffTime(), is(Duration.ZERO));
+                        assertThat(ctx.actionWasScheduled, is(false));
                     });
 
-            final Executing executing = new ExecutingStateBuilder().build(context);
+            new ExecutingStateBuilder().build(ctx);
         }
     }
 
@@ -491,6 +597,9 @@ public class ExecutingTest extends TestLogger {
                 TestingDefaultExecutionGraphBuilder.newBuilder()
                         .build(EXECUTOR_RESOURCE.getExecutor());
         private OperatorCoordinatorHandler operatorCoordinatorHandler;
+        private Duration scalingIntervalMin = Duration.ZERO;
+        @Nullable private Duration scalingIntervalMax;
+        private Instant lastRescale = Instant.now();
 
         private ExecutingStateBuilder() throws JobException, JobExecutionException {
             operatorCoordinatorHandler = new TestingOperatorCoordinatorHandler();
@@ -507,6 +616,21 @@ public class ExecutingTest extends TestLogger {
             return this;
         }
 
+        public ExecutingStateBuilder setScalingIntervalMin(Duration scalingIntervalMin) {
+            this.scalingIntervalMin = scalingIntervalMin;
+            return this;
+        }
+
+        public ExecutingStateBuilder setScalingIntervalMax(Duration scalingIntervalMax) {
+            this.scalingIntervalMax = scalingIntervalMax;
+            return this;
+        }
+
+        public ExecutingStateBuilder setLastRescale(Instant lastRescale) {
+            this.lastRescale = lastRescale;
+            return this;
+        }
+
         private Executing build(MockExecutingContext ctx) {
             executionGraph.transitionToRunning();
 
@@ -517,7 +641,10 @@ public class ExecutingTest extends TestLogger {
                     log,
                     ctx,
                     ClassLoader.getSystemClassLoader(),
-                    new ArrayList<>());
+                    new ArrayList<>(),
+                    scalingIntervalMin,
+                    scalingIntervalMax,
+                    lastRescale);
         }
     }
 
@@ -538,7 +665,9 @@ public class ExecutingTest extends TestLogger {
                 new StateValidator<>("cancelling");
 
         private Function<Throwable, FailureResult> howToHandleFailure;
-        private Supplier<Boolean> canScaleUp = () -> false;
+        private boolean canScaleUpWithoutForce = false;
+        private boolean canScaleUpWithForce = false;
+        private boolean actionWasScheduled = false;
         private StateValidator<StopWithSavepointArguments> stopWithSavepointValidator =
                 new StateValidator<>("stopWithSavepoint");
         private CompletableFuture<String> mockedStopWithSavepointOperationFuture =
@@ -564,8 +693,13 @@ public class ExecutingTest extends TestLogger {
             this.howToHandleFailure = function;
         }
 
-        public void setCanScaleUp(Supplier<Boolean> supplier) {
-            this.canScaleUp = supplier;
+        public void setCanScaleUp(boolean canScaleUpWithoutForce, boolean canScaleUpWithForce) {
+            this.canScaleUpWithoutForce = canScaleUpWithoutForce;
+            this.canScaleUpWithForce = canScaleUpWithForce;
+        }
+
+        public void setCanScaleUp(boolean canScaleUpWithoutForce) {
+            this.canScaleUpWithoutForce = canScaleUpWithoutForce;
         }
 
         // --------- Interface Implementations ------- //
@@ -588,8 +722,12 @@ public class ExecutingTest extends TestLogger {
         }
 
         @Override
-        public boolean shouldRescale(ExecutionGraph executionGraph) {
-            return canScaleUp.get();
+        public boolean shouldRescale(ExecutionGraph executionGraph, boolean forceRescale) {
+            if (forceRescale) {
+                return canScaleUpWithForce;
+            } else {
+                return canScaleUpWithoutForce;
+            }
         }
 
         @Override
@@ -645,6 +783,7 @@ public class ExecutingTest extends TestLogger {
 
         @Override
         public ScheduledFuture<?> runIfState(State expectedState, Runnable action, Duration delay) {
+            actionWasScheduled = !delay.isZero();
             if (!hadStateTransition) {
                 action.run();
             }
@@ -804,7 +943,8 @@ public class ExecutingTest extends TestLogger {
         }
 
         @Override
-        public void handleGlobalFailure(Throwable cause) {}
+        public void handleGlobalFailure(
+                Throwable cause, CompletableFuture<Map<String, String>> failureLabels) {}
 
         @Override
         public Logger getLogger() {
@@ -828,7 +968,8 @@ public class ExecutingTest extends TestLogger {
                     Time.milliseconds(1L),
                     1L,
                     new DefaultSubtaskAttemptNumberStore(Collections.emptyList()),
-                    new CoordinatorStoreImpl());
+                    new CoordinatorStoreImpl(),
+                    UnregisteredMetricGroups.createUnregisteredJobManagerJobMetricGroup());
             mockExecutionVertex = executionVertexSupplier.apply(this);
         }
 
@@ -915,18 +1056,6 @@ public class ExecutingTest extends TestLogger {
 
         @Override
         public BlobWriter getBlobWriter() {
-            return null;
-        }
-
-        @Override
-        public Either<SerializedValue<JobInformation>, PermanentBlobKey>
-                getJobInformationOrBlobKey() {
-            return null;
-        }
-
-        @Override
-        public TaskDeploymentDescriptorFactory.PartitionLocationConstraint
-                getPartitionLocationConstraint() {
             return null;
         }
 
@@ -1028,12 +1157,6 @@ public class ExecutingTest extends TestLogger {
         }
 
         @Override
-        public boolean isNonFinishedHybridPartitionShouldBeUnknown() {
-            throw new UnsupportedOperationException(
-                    "This method is not supported by the MockInternalExecutionGraphAccessor.");
-        }
-
-        @Override
         public ExecutionGraphID getExecutionGraphID() {
             return new ExecutionGraphID();
         }
@@ -1048,6 +1171,12 @@ public class ExecutingTest extends TestLogger {
         @Override
         public JobVertexInputInfo getJobVertexInputInfo(
                 JobVertexID jobVertexId, IntermediateDataSetID resultId) {
+            throw new UnsupportedOperationException(
+                    "This method is not supported by the MockInternalExecutionGraphAccessor.");
+        }
+
+        @Override
+        public TaskDeploymentDescriptorFactory getTaskDeploymentDescriptorFactory() {
             throw new UnsupportedOperationException(
                     "This method is not supported by the MockInternalExecutionGraphAccessor.");
         }

@@ -43,7 +43,15 @@ public class SqlNodeConverters {
         register(new SqlAlterViewRenameConverter());
         register(new SqlAlterViewPropertiesConverter());
         register(new SqlAlterViewAsConverter());
+        register(new SqlAlterTableAddPartitionConverter());
+        register(new SqlAlterTableDropPartitionConverter());
         register(new SqlQueryConverter());
+        register(new SqlShowPartitionsConverter());
+        register(new SqlTruncateTableConverter());
+        register(new SqlShowFunctionsConverter());
+        register(new SqlShowProcedureConverter());
+        register(new SqlReplaceTableAsConverter());
+        register(new SqlProcedureCallConverter());
     }
 
     /**

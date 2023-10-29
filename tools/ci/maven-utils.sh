@@ -21,19 +21,17 @@ function run_mvn {
 		MVN_CMD="${M2_HOME}/bin/mvn"
 	fi
 
-	ARGS=$@
-	INVOCATION="$MVN_CMD $MVN_GLOBAL_OPTIONS $ARGS"
 	if [[ "$MVN_RUN_VERBOSE" != "false" ]]; then
-		echo "Invoking mvn with '$INVOCATION'"
+		echo "Invoking mvn with '$MVN_GLOBAL_OPTIONS ${@}'"
 	fi
-	eval $INVOCATION
+	$MVN_CMD $MVN_GLOBAL_OPTIONS "${@}"
 }
 export -f run_mvn
 
 function setup_maven {
 	set -e # fail if there was an error setting up maven
 	if [ ! -d "${MAVEN_VERSIONED_DIR}" ]; then
-	  wget https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.zip
+	  wget -nv https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.zip
 	  unzip -d "${MAVEN_CACHE_DIR}" -qq "apache-maven-${MAVEN_VERSION}-bin.zip"
 	  rm "apache-maven-${MAVEN_VERSION}-bin.zip"
 	fi
@@ -83,7 +81,7 @@ function collect_coredumps {
 
 CI_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
-MAVEN_VERSION="3.2.5"
+MAVEN_VERSION="3.8.6"
 MAVEN_CACHE_DIR=${HOME}/maven_cache
 MAVEN_VERSIONED_DIR=${MAVEN_CACHE_DIR}/apache-maven-${MAVEN_VERSION}
 

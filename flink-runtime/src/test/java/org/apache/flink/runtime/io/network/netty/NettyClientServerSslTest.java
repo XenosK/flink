@@ -28,7 +28,6 @@ import org.apache.flink.util.NetUtils;
 import org.apache.flink.util.TestLogger;
 
 import org.apache.flink.shaded.netty4.io.netty.channel.Channel;
-import org.apache.flink.shaded.netty4.io.netty.channel.ChannelHandler;
 import org.apache.flink.shaded.netty4.io.netty.channel.socket.SocketChannel;
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.string.StringDecoder;
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.string.StringEncoder;
@@ -42,6 +41,7 @@ import org.junit.runners.Parameterized;
 import javax.net.ssl.SSLSessionContext;
 
 import java.net.InetAddress;
+import java.time.Duration;
 import java.util.List;
 
 import static org.apache.flink.configuration.SecurityOptions.SSL_INTERNAL_CLOSE_NOTIFY_FLUSH_TIMEOUT;
@@ -75,9 +75,13 @@ public class NettyClientServerSslTest extends TestLogger {
     public void testValidSslConnectionAdvanced() throws Exception {
         Configuration sslConfig = createSslConfig();
         sslConfig.setInteger(SSL_INTERNAL_SESSION_CACHE_SIZE, 1);
-        sslConfig.setInteger(SSL_INTERNAL_SESSION_TIMEOUT, 1_000);
-        sslConfig.setInteger(SSL_INTERNAL_HANDSHAKE_TIMEOUT, 1_000);
-        sslConfig.setInteger(SSL_INTERNAL_CLOSE_NOTIFY_FLUSH_TIMEOUT, 1_000);
+
+        // using different timeouts for each of the configuration parameters ensures that the right
+        // config value is used in the right place
+        final int timeoutInMillisBase = (int) Duration.ofHours(1).toMillis();
+        sslConfig.setInteger(SSL_INTERNAL_SESSION_TIMEOUT, timeoutInMillisBase + 1);
+        sslConfig.setInteger(SSL_INTERNAL_HANDSHAKE_TIMEOUT, timeoutInMillisBase + 2);
+        sslConfig.setInteger(SSL_INTERNAL_CLOSE_NOTIFY_FLUSH_TIMEOUT, timeoutInMillisBase + 3);
 
         testValidSslConnection(sslConfig);
     }
@@ -86,7 +90,7 @@ public class NettyClientServerSslTest extends TestLogger {
         OneShotLatch serverChannelInitComplete = new OneShotLatch();
         final SslHandler[] serverSslHandler = new SslHandler[1];
 
-        NettyProtocol protocol = new NoOpProtocol();
+        NettyProtocol protocol = new NettyTestUtil.NoOpProtocol();
 
         NettyServerAndClient serverAndClient;
         try (NetUtils.Port port = NetUtils.getAvailablePort()) {
@@ -174,7 +178,7 @@ public class NettyClientServerSslTest extends TestLogger {
     /** Verify failure on invalid ssl configuration. */
     @Test
     public void testInvalidSslConfiguration() throws Exception {
-        NettyProtocol protocol = new NoOpProtocol();
+        NettyProtocol protocol = new NettyTestUtil.NoOpProtocol();
 
         Configuration config = createSslConfig();
         // Modify the keystore password to an incorrect one
@@ -196,7 +200,7 @@ public class NettyClientServerSslTest extends TestLogger {
     /** Verify SSL handshake error when untrusted server certificate is used. */
     @Test
     public void testSslHandshakeError() throws Exception {
-        NettyProtocol protocol = new NoOpProtocol();
+        NettyProtocol protocol = new NettyTestUtil.NoOpProtocol();
 
         Configuration config = createSslConfig();
 
@@ -237,7 +241,7 @@ public class NettyClientServerSslTest extends TestLogger {
             final NettyConfig nettyClientConfig = createNettyConfig(clientConfig, clientPort);
 
             final NettyBufferPool bufferPool = new NettyBufferPool(1);
-            final NettyProtocol protocol = new NoOpProtocol();
+            final NettyProtocol protocol = new NettyTestUtil.NoOpProtocol();
 
             final NettyServer server =
                     NettyTestUtil.initServer(nettyServerConfig, protocol, bufferPool);
@@ -259,7 +263,7 @@ public class NettyClientServerSslTest extends TestLogger {
 
     @Test
     public void testSslPinningForValidFingerprint() throws Exception {
-        NettyProtocol protocol = new NoOpProtocol();
+        NettyProtocol protocol = new NettyTestUtil.NoOpProtocol();
 
         Configuration config = createSslConfig();
 
@@ -286,7 +290,7 @@ public class NettyClientServerSslTest extends TestLogger {
 
     @Test
     public void testSslPinningForInvalidFingerprint() throws Exception {
-        NettyProtocol protocol = new NoOpProtocol();
+        NettyProtocol protocol = new NettyTestUtil.NoOpProtocol();
 
         Configuration config = createSslConfig();
 
@@ -324,23 +328,6 @@ public class NettyClientServerSslTest extends TestLogger {
                 NettyTestUtil.DEFAULT_SEGMENT_SIZE,
                 1,
                 config);
-    }
-
-    private static final class NoOpProtocol extends NettyProtocol {
-
-        NoOpProtocol() {
-            super(null, null);
-        }
-
-        @Override
-        public ChannelHandler[] getServerChannelHandlers() {
-            return new ChannelHandler[0];
-        }
-
-        @Override
-        public ChannelHandler[] getClientChannelHandlers() {
-            return new ChannelHandler[0];
-        }
     }
 
     /**

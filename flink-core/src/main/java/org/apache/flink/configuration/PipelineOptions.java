@@ -85,6 +85,19 @@ public class PipelineOptions {
                                                     + " without discarding state.")
                                     .build());
 
+    /**
+     * An option to control whether Flink is automatically registering all types in the user
+     * programs with Kryo.
+     *
+     * @deprecated The config is deprecated because it's only used in DataSet API. All Flink DataSet
+     *     APIs are deprecated since Flink 1.18 and will be removed in a future Flink major version.
+     *     You can still build your application in DataSet, but you should move to either the
+     *     DataStream and/or Table API.
+     * @see <a href="https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=158866741">
+     *     FLIP-131: Consolidate the user-facing Dataflow SDKs/APIs (and deprecate the DataSet
+     *     API</a>
+     */
+    @Deprecated
     public static final ConfigOption<Boolean> AUTO_TYPE_REGISTRATION =
             key("pipeline.auto-type-registration")
                     .booleanType()
@@ -243,12 +256,21 @@ public class PipelineOptions {
                                     .build());
 
     public static final ConfigOption<Boolean> OPERATOR_CHAINING =
-            key("pipeline.operator-chaining")
+            key("pipeline.operator-chaining.enabled")
                     .booleanType()
                     .defaultValue(true)
+                    .withDeprecatedKeys("pipeline.operator-chaining")
                     .withDescription(
                             "Operator chaining allows non-shuffle operations to be co-located in the same thread "
                                     + "fully avoiding serialization and de-serialization.");
+
+    public static final ConfigOption<Boolean>
+            OPERATOR_CHAINING_CHAIN_OPERATORS_WITH_DIFFERENT_MAX_PARALLELISM =
+                    key("pipeline.operator-chaining.chain-operators-with-different-max-parallelism")
+                            .booleanType()
+                            .defaultValue(true)
+                            .withDescription(
+                                    "Operators with different max parallelism can be chained together. Default behavior may prevent rescaling when the AdaptiveScheduler is used.");
 
     public static final ConfigOption<List<String>> CACHED_FILES =
             key("pipeline.cached-files")
@@ -303,10 +325,10 @@ public class PipelineOptions {
                             "If watermark alignment is used, sources with multiple splits will "
                                     + "attempt to pause/resume split readers to avoid watermark "
                                     + "drift of source splits. "
-                                    + "However, if split readers don't support pause/resume an "
+                                    + "However, if split readers don't support pause/resume, an "
                                     + "UnsupportedOperationException will be thrown when there is "
                                     + "an attempt to pause/resume. To allow use of split readers that "
-                                    + "don't support pause/resume and, hence, t allow unaligned splits "
+                                    + "don't support pause/resume and, hence, to allow unaligned splits "
                                     + "while still using watermark alignment, set this parameter to true. "
                                     + "The default value is false. Note: This parameter may be "
                                     + "removed in future releases.");

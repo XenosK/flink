@@ -52,6 +52,7 @@ import org.apache.flink.table.types.inference.TypeInference;
 import org.apache.flink.table.types.inference.TypeStrategies;
 import org.apache.flink.table.types.logical.RawType;
 import org.apache.flink.types.Row;
+import org.apache.flink.util.CloseableIterator;
 import org.apache.flink.util.CollectionUtil;
 import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.Preconditions;
@@ -229,13 +230,17 @@ public class FunctionITCase extends StreamingTestBase {
     }
 
     @Test
-    public void testCreateTemporarySystemFunctionByUsingJar() {
+    public void testCreateTemporarySystemFunctionByUsingJar() throws Exception {
         String ddl =
                 String.format(
                         "CREATE TEMPORARY SYSTEM FUNCTION f10 AS '%s' USING JAR '%s'",
                         udfClassName, jarPath);
         tEnv().executeSql(ddl);
         assertThat(Arrays.asList(tEnv().listFunctions())).contains("f10");
+
+        try (CloseableIterator<Row> itor = tEnv().executeSql("SHOW JARS").collect()) {
+            assertThat(itor.hasNext()).isFalse();
+        }
 
         tEnv().executeSql("DROP TEMPORARY SYSTEM FUNCTION f10");
         assertThat(Arrays.asList(tEnv().listFunctions())).doesNotContain("f10");
@@ -1329,6 +1334,50 @@ public class FunctionITCase extends StreamingTestBase {
                 "drop function lowerUdf");
     }
 
+    @Test
+    public void testArrayWithPrimitiveType() {
+        List<Row> sourceData = Arrays.asList(Row.of(1, 2), Row.of(3, 4));
+        TestCollectionTableFactory.reset();
+        TestCollectionTableFactory.initData(sourceData);
+
+        tEnv().executeSql(
+                        "CREATE TABLE SourceTable(i INT NOT NULL, j INT NOT NULL) WITH ('connector' = 'COLLECTION')");
+        tEnv().executeSql(
+                        "CREATE FUNCTION row_of_array AS '"
+                                + RowOfArrayWithIntFunction.class.getName()
+                                + "'");
+        List<Row> rows =
+                CollectionUtil.iteratorToList(
+                        tEnv().executeSql("SELECT row_of_array(i, j) FROM SourceTable").collect());
+        assertThat(rows)
+                .isEqualTo(
+                        Arrays.asList(
+                                Row.of(Row.of((Object) new int[] {1, 2})),
+                                Row.of(Row.of((Object) new int[] {3, 4}))));
+    }
+
+    @Test
+    public void testArrayWithPrimitiveBoxedType() {
+        List<Row> sourceData = Arrays.asList(Row.of(1, null), Row.of(3, null));
+        TestCollectionTableFactory.reset();
+        TestCollectionTableFactory.initData(sourceData);
+
+        tEnv().executeSql(
+                        "CREATE TABLE SourceTable(i INT NOT NULL, j INT) WITH ('connector' = 'COLLECTION')");
+        tEnv().executeSql(
+                        "CREATE FUNCTION row_of_array AS '"
+                                + RowOfArrayWithIntegerFunction.class.getName()
+                                + "'");
+        List<Row> rows =
+                CollectionUtil.iteratorToList(
+                        tEnv().executeSql("SELECT row_of_array(i, j) FROM SourceTable").collect());
+        assertThat(rows)
+                .isEqualTo(
+                        Arrays.asList(
+                                Row.of(Row.of((Object) new Integer[] {1, null})),
+                                Row.of(Row.of((Object) new Integer[] {3, null}))));
+    }
+
     // --------------------------------------------------------------------------------------------
     // Test functions
     // --------------------------------------------------------------------------------------------
@@ -1753,6 +1802,22 @@ public class FunctionITCase extends StreamingTestBase {
     public static class BoolEcho extends ScalarFunction {
         public Boolean eval(@DataTypeHint("BOOLEAN NOT NULL") Boolean b) {
             return b;
+        }
+    }
+
+    /** A function with Row of array with int as return type for test FLINK-31835. */
+    public static class RowOfArrayWithIntFunction extends ScalarFunction {
+        @DataTypeHint("Row<t ARRAY<INT NOT NULL>>")
+        public Row eval(int... v) {
+            return Row.of((Object) v);
+        }
+    }
+
+    /** A function with Row of array with integer as return type for test FLINK-31835. */
+    public static class RowOfArrayWithIntegerFunction extends ScalarFunction {
+        @DataTypeHint("Row<t ARRAY<INT>>")
+        public Row eval(Integer... v) {
+            return Row.of((Object) v);
         }
     }
 
