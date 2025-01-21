@@ -19,13 +19,16 @@
 package org.apache.flink.runtime.state.v2;
 
 import org.apache.flink.api.common.state.v2.State;
+import org.apache.flink.api.common.state.v2.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.core.state.InternalStateFuture;
 import org.apache.flink.runtime.asyncprocessing.AsyncExecutionController;
 import org.apache.flink.runtime.asyncprocessing.StateExecutor;
 import org.apache.flink.runtime.asyncprocessing.StateRequest;
 import org.apache.flink.runtime.asyncprocessing.StateRequestContainer;
 import org.apache.flink.runtime.asyncprocessing.StateRequestHandler;
 import org.apache.flink.runtime.asyncprocessing.StateRequestType;
+import org.apache.flink.runtime.asyncprocessing.declare.DeclarationManager;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.mailbox.SyncMailboxExecutor;
 import org.apache.flink.runtime.state.AsyncKeyedStateBackend;
@@ -78,10 +81,12 @@ public class AbstractKeyedStateTestBase {
                             exception.set(b);
                         },
                         testStateExecutor,
+                        new DeclarationManager(),
                         1,
                         1,
                         1000,
                         1,
+                        null,
                         null);
         exception = new AtomicReference<>(null);
     }
@@ -173,12 +178,11 @@ public class AbstractKeyedStateTestBase {
                 @Override
                 public void setup(@Nonnull StateRequestHandler stateRequestHandler) {}
 
-                @Nonnull
                 @Override
-                public <N, S extends State, SV> S createState(
-                        @Nonnull N defaultNamespace,
-                        @Nonnull TypeSerializer<N> namespaceSerializer,
-                        @Nonnull StateDescriptor<SV> stateDesc)
+                public <N, S extends State, SV> S getOrCreateKeyedState(
+                        N defaultNamespace,
+                        TypeSerializer<N> namespaceSerializer,
+                        StateDescriptor<SV> stateDesc)
                         throws Exception {
                     return null;
                 }
@@ -234,14 +238,9 @@ public class AbstractKeyedStateTestBase {
         @Override
         public CompletableFuture<Void> executeBatchRequests(
                 StateRequestContainer stateRequestContainer) {
-            receivedRequest.addAll(((TestStateRequestContainer) stateRequestContainer).requests);
-            for (StateRequest request : receivedRequest) {
-                if (request.getRequestType() == StateRequestType.MAP_CONTAINS
-                        || request.getRequestType() == StateRequestType.MAP_IS_EMPTY) {
-                    request.getFuture().complete(true);
-                } else {
-                    request.getFuture().complete(null);
-                }
+            for (StateRequest request :
+                    ((TestStateRequestContainer) stateRequestContainer).requests) {
+                executeRequestSync(request);
             }
             CompletableFuture<Void> future = new CompletableFuture<>();
             future.complete(null);
@@ -251,6 +250,17 @@ public class AbstractKeyedStateTestBase {
         @Override
         public StateRequestContainer createStateRequestContainer() {
             return new TestStateRequestContainer();
+        }
+
+        @Override
+        public void executeRequestSync(StateRequest<?, ?, ?, ?> request) {
+            receivedRequest.add(request);
+            if (request.getRequestType() == StateRequestType.MAP_CONTAINS
+                    || request.getRequestType() == StateRequestType.MAP_IS_EMPTY) {
+                ((InternalStateFuture<Boolean>) request.getFuture()).complete(true);
+            } else {
+                request.getFuture().complete(null);
+            }
         }
 
         @Override

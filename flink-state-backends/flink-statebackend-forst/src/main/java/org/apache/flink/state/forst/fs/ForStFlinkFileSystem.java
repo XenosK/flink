@@ -19,20 +19,40 @@
 package org.apache.flink.state.forst.fs;
 
 import org.apache.flink.annotation.Experimental;
-import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.core.fs.BlockLocation;
+import org.apache.flink.core.fs.FSDataInputStream;
+import org.apache.flink.core.fs.FSDataOutputStream;
 import org.apache.flink.core.fs.FileStatus;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
+import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.runtime.state.StreamStateHandle;
+import org.apache.flink.state.forst.fs.cache.BundledCacheLimitPolicy;
+import org.apache.flink.state.forst.fs.cache.CacheLimitPolicy;
+import org.apache.flink.state.forst.fs.cache.CachedDataInputStream;
+import org.apache.flink.state.forst.fs.cache.CachedDataOutputStream;
+import org.apache.flink.state.forst.fs.cache.FileBasedCache;
+import org.apache.flink.state.forst.fs.cache.SizeBasedCacheLimitPolicy;
+import org.apache.flink.state.forst.fs.cache.SpaceBasedCacheLimitPolicy;
+import org.apache.flink.state.forst.fs.filemapping.FileBackedMappingEntrySource;
+import org.apache.flink.state.forst.fs.filemapping.FileMappingManager;
+import org.apache.flink.state.forst.fs.filemapping.FileOwnershipDecider;
+import org.apache.flink.state.forst.fs.filemapping.MappingEntry;
+import org.apache.flink.state.forst.fs.filemapping.MappingEntrySource;
 import org.apache.flink.util.Preconditions;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+
+import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Function;
-
-import static org.apache.flink.util.Preconditions.checkNotNull;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * A {@link FileSystem} delegates some requests to file system loaded by Flink FileSystem mechanism.
@@ -43,24 +63,31 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 @Experimental
 public class ForStFlinkFileSystem extends FileSystem {
 
+    private static final Logger LOG = LoggerFactory.getLogger(ForStFlinkFileSystem.class);
+
     // TODO: make it configurable
     private static final int DEFAULT_INPUT_STREAM_CAPACITY = 32;
 
-    private static final Map<String, String> remoteLocalMapping = new ConcurrentHashMap<>();
-    private static final Function<String, Boolean> miscFileFilter = s -> !s.endsWith(".sst");
+    private static final long SST_FILE_SIZE = 1024 * 1024 * 64;
 
     private final FileSystem localFS;
     private final FileSystem delegateFS;
     private final String remoteBase;
-    private final Function<String, Boolean> localFileFilter;
-    private final String localBase;
+    @Nullable private final FileBasedCache fileBasedCache;
+    @Nonnull private final FileMappingManager fileMappingManager;
 
-    public ForStFlinkFileSystem(FileSystem delegateFS, String remoteBase, String localBase) {
+    public ForStFlinkFileSystem(
+            FileSystem delegateFS,
+            String remoteBase,
+            String localBase,
+            @Nullable FileOwnershipDecider fileOwnershipDecider,
+            @Nullable FileBasedCache fileBasedCache) {
         this.localFS = FileSystem.getLocalFileSystem();
         this.delegateFS = delegateFS;
-        this.localFileFilter = miscFileFilter;
         this.remoteBase = remoteBase;
-        this.localBase = localBase;
+        this.fileBasedCache = fileBasedCache;
+        this.fileMappingManager =
+                new FileMappingManager(delegateFS, fileOwnershipDecider, remoteBase, localBase);
     }
 
     /**
@@ -72,29 +99,66 @@ public class ForStFlinkFileSystem extends FileSystem {
      *     identified by the given {@link URI}.
      * @throws IOException thrown if a reference to the file system instance could not be obtained.
      */
-    public static FileSystem get(URI uri) throws IOException {
-        String localBase = remoteLocalMapping.get(uri.toString());
-        Preconditions.checkNotNull(localBase, "localBase is null, remote uri:" + uri);
-        return new ForStFlinkFileSystem(FileSystem.get(uri), uri.toString(), localBase);
+    public static ForStFlinkFileSystem get(URI uri) throws IOException {
+        return new ForStFlinkFileSystem(
+                FileSystem.get(uri),
+                uri.toString(),
+                System.getProperty("java.io.tmpdir"),
+                null,
+                null);
     }
 
-    /**
-     * Setup local base path for corresponding remote base path.
-     *
-     * @param remoteBasePath the remote base path.
-     * @param localBasePath the local base path.
-     */
-    public static void setupLocalBasePath(String remoteBasePath, String localBasePath) {
-        remoteLocalMapping.put(remoteBasePath, localBasePath);
+    public static ForStFlinkFileSystem get(
+            URI uri,
+            Path localBase,
+            FileOwnershipDecider fileOwnershipDecider,
+            FileBasedCache fileBasedCache)
+            throws IOException {
+        Preconditions.checkNotNull(localBase, "localBase is null, remote uri: %s.", uri);
+        return new ForStFlinkFileSystem(
+                FileSystem.get(uri),
+                uri.toString(),
+                localBase.toString(),
+                fileOwnershipDecider,
+                fileBasedCache);
     }
 
-    /**
-     * Unregister local base path for corresponding remote base path.
-     *
-     * @param remoteBasePath the remote base path.
-     */
-    public static void unregisterLocalBasePath(String remoteBasePath) {
-        remoteLocalMapping.remove(remoteBasePath);
+    public static FileBasedCache getFileBasedCache(
+            Path cacheBase, long cacheCapacity, long cacheReservedSize, MetricGroup metricGroup)
+            throws IOException {
+        if (cacheBase == null || cacheCapacity <= 0 && cacheReservedSize <= 0) {
+            return null;
+        }
+        CacheLimitPolicy cacheLimitPolicy = null;
+        if (cacheCapacity > 0 && cacheReservedSize > 0) {
+            cacheLimitPolicy =
+                    new BundledCacheLimitPolicy(
+                            new SizeBasedCacheLimitPolicy(cacheCapacity),
+                            new SpaceBasedCacheLimitPolicy(
+                                    new File(cacheBase.toString()),
+                                    cacheReservedSize,
+                                    SST_FILE_SIZE));
+        } else if (cacheCapacity > 0) {
+            cacheLimitPolicy = new SizeBasedCacheLimitPolicy(cacheCapacity);
+        } else if (cacheReservedSize > 0) {
+            cacheLimitPolicy =
+                    new SpaceBasedCacheLimitPolicy(
+                            new File(cacheBase.toString()), cacheReservedSize, SST_FILE_SIZE);
+        }
+        return new FileBasedCache(
+                Integer.MAX_VALUE,
+                cacheLimitPolicy,
+                cacheBase.getFileSystem(),
+                cacheBase,
+                metricGroup);
+    }
+
+    public FileSystem getDelegateFS() {
+        return delegateFS;
+    }
+
+    public String getRemoteBase() {
+        return remoteBase;
     }
 
     /**
@@ -111,217 +175,262 @@ public class ForStFlinkFileSystem extends FileSystem {
     }
 
     @Override
-    public ByteBufferWritableFSDataOutputStream create(Path path, WriteMode overwriteMode)
+    public synchronized ByteBufferWritableFSDataOutputStream create(
+            Path dbFilePath, WriteMode overwriteMode) throws IOException {
+        // Create a file in the mapping table
+        MappingEntry createdMappingEntry = fileMappingManager.createNewFile(dbFilePath);
+
+        // The source must be backed by a file
+        FileBackedMappingEntrySource source =
+                (FileBackedMappingEntrySource) createdMappingEntry.getSource();
+        Path sourceRealPath = source.getFilePath();
+
+        // Create the actual file output stream
+        FileSystem fileSystem = sourceRealPath.getFileSystem();
+        FSDataOutputStream outputStream = fileSystem.create(sourceRealPath, overwriteMode);
+
+        // Try to create file cache for SST files
+        CachedDataOutputStream cachedDataOutputStream =
+                createCachedDataOutputStream(dbFilePath, sourceRealPath, outputStream);
+
+        LOG.info(
+                "Create file: dbFilePath: {}, sourceRealPath: {}, cachedDataOutputStream: {}",
+                dbFilePath,
+                sourceRealPath,
+                cachedDataOutputStream);
+        return new ByteBufferWritableFSDataOutputStream(
+                cachedDataOutputStream == null ? outputStream : cachedDataOutputStream);
+    }
+
+    @Override
+    public synchronized ByteBufferReadableFSDataInputStream open(Path dbFilePath, int bufferSize)
             throws IOException {
-        Tuple2<Boolean, Path> localPathTuple = tryBuildLocalPath(path);
-        if (localPathTuple.f0) {
-            return new ByteBufferWritableFSDataOutputStream(
-                    localFS.create(localPathTuple.f1, overwriteMode));
-        }
-        return new ByteBufferWritableFSDataOutputStream(delegateFS.create(path, overwriteMode));
-    }
+        MappingEntry mappingEntry = fileMappingManager.mappingEntry(dbFilePath.toString());
+        Preconditions.checkNotNull(mappingEntry);
+        MappingEntrySource source = mappingEntry.getSource();
 
-    @Override
-    public ByteBufferReadableFSDataInputStream open(Path path, int bufferSize) throws IOException {
-        Tuple2<Boolean, Path> localPathTuple = tryBuildLocalPath(path);
-        if (localPathTuple.f0) {
-            return new ByteBufferReadableFSDataInputStream(
-                    () -> localFS.open(localPathTuple.f1, bufferSize),
-                    DEFAULT_INPUT_STREAM_CAPACITY,
-                    localFS.getFileStatus(localPathTuple.f1).getLen());
-        }
-        FileStatus fileStatus = checkNotNull(getFileStatus(path));
         return new ByteBufferReadableFSDataInputStream(
-                () -> delegateFS.open(path, bufferSize),
+                () -> {
+                    FSDataInputStream inputStream = source.openInputStream(bufferSize);
+                    CachedDataInputStream cachedDataInputStream =
+                            createCachedDataInputStream(dbFilePath, source, inputStream);
+                    return cachedDataInputStream == null ? inputStream : cachedDataInputStream;
+                },
                 DEFAULT_INPUT_STREAM_CAPACITY,
-                fileStatus.getLen());
+                source.getSize());
     }
 
     @Override
-    public ByteBufferReadableFSDataInputStream open(Path path) throws IOException {
-        Tuple2<Boolean, Path> localPathTuple = tryBuildLocalPath(path);
-        if (localPathTuple.f0) {
-            return new ByteBufferReadableFSDataInputStream(
-                    () -> localFS.open(localPathTuple.f1),
-                    DEFAULT_INPUT_STREAM_CAPACITY,
-                    localFS.getFileStatus(localPathTuple.f1).getLen());
-        }
-        FileStatus fileStatus = checkNotNull(getFileStatus(path));
+    public synchronized ByteBufferReadableFSDataInputStream open(Path dbFilePath)
+            throws IOException {
+        MappingEntry mappingEntry = fileMappingManager.mappingEntry(dbFilePath.toString());
+        Preconditions.checkNotNull(mappingEntry);
+        MappingEntrySource source = mappingEntry.getSource();
+
         return new ByteBufferReadableFSDataInputStream(
-                () -> delegateFS.open(path), DEFAULT_INPUT_STREAM_CAPACITY, fileStatus.getLen());
+                () -> {
+                    FSDataInputStream inputStream = source.openInputStream();
+                    CachedDataInputStream cachedDataInputStream =
+                            createCachedDataInputStream(dbFilePath, source, inputStream);
+                    return cachedDataInputStream == null ? inputStream : cachedDataInputStream;
+                },
+                DEFAULT_INPUT_STREAM_CAPACITY,
+                source.getSize());
     }
 
     @Override
-    public boolean rename(Path src, Path dst) throws IOException {
-        // The rename is not atomic for ForSt. Some FileSystems e.g. HDFS, OSS does not allow a
-        // renaming if the target already exists. So, we delete the target before attempting the
-        // rename.
-
-        if (localFileFilter.apply(src.getName())) {
-            Path localSrc = tryBuildLocalPath(src).f1;
-            Path localDst = tryBuildLocalPath(dst).f1;
-            FileStatus fileStatus = localFS.getFileStatus(localSrc);
-            boolean success = localFS.rename(localSrc, localDst);
-            if (!fileStatus.isDir()) {
-                return success;
-            }
-        }
-
-        if (delegateFS.exists(dst)) {
-            boolean deleted = delegateFS.delete(dst, false);
-            if (!deleted) {
-                throw new IOException("Fail to delete dst path: " + dst);
-            }
-        }
-        return delegateFS.rename(src, dst);
+    public synchronized boolean rename(Path src, Path dst) throws IOException {
+        return fileMappingManager.renameFile(src.toString(), dst.toString());
     }
 
     @Override
-    public Path getWorkingDirectory() {
+    public synchronized Path getWorkingDirectory() {
         return delegateFS.getWorkingDirectory();
     }
 
     @Override
-    public Path getHomeDirectory() {
+    public synchronized Path getHomeDirectory() {
         return delegateFS.getHomeDirectory();
     }
 
     @Override
-    public URI getUri() {
+    public synchronized URI getUri() {
         return delegateFS.getUri();
     }
 
     @Override
-    public boolean exists(final Path f) throws IOException {
-        Tuple2<Boolean, Path> localPathTuple = tryBuildLocalPath(f);
-        if (localPathTuple.f0) {
-            return localFS.exists(localPathTuple.f1);
+    public synchronized boolean exists(final Path f) throws IOException {
+        MappingEntry mappingEntry = fileMappingManager.mappingEntry(f.toString());
+        if (mappingEntry == null) {
+            return delegateFS.exists(f) && delegateFS.getFileStatus(f).isDir();
         }
-        return delegateFS.exists(f);
+
+        if (FileOwnershipDecider.shouldAlwaysBeLocal(f)) {
+            return localFS.exists(mappingEntry.getSourcePath())
+                    || delegateFS.exists(mappingEntry.getSourcePath());
+        } else {
+            return delegateFS.exists(mappingEntry.getSourcePath());
+        }
     }
 
     @Override
-    public FileStatus getFileStatus(Path path) throws IOException {
-        Tuple2<Boolean, Path> localPathTuple = tryBuildLocalPath(path);
-        if (localPathTuple.f0) {
-            return localFS.getFileStatus(localPathTuple.f1);
-        }
-        return delegateFS.getFileStatus(path);
+    public synchronized FileStatus getFileStatus(Path path) throws IOException {
+        Path sourcePath = getSourcePath(path);
+        FileSystem fileSystem = sourcePath.getFileSystem();
+        return new FileStatusWrapper(fileSystem.getFileStatus(sourcePath), path);
     }
 
     @Override
-    public BlockLocation[] getFileBlockLocations(FileStatus file, long start, long len)
+    public synchronized BlockLocation[] getFileBlockLocations(FileStatus file, long start, long len)
             throws IOException {
-        Path path = file.getPath();
-        Tuple2<Boolean, Path> localPathTuple = tryBuildLocalPath(path);
-        if (localPathTuple.f0) {
-            FileStatus localFile = localFS.getFileStatus(localPathTuple.f1);
-            return localFS.getFileBlockLocations(localFile, start, len);
+        Path sourcePath = getSourcePath(file.getPath());
+
+        FileSystem fileSystem = sourcePath.getFileSystem();
+        FileStatus fileStatus = fileSystem.getFileStatus(sourcePath);
+        return fileSystem.getFileBlockLocations(fileStatus, start, len);
+    }
+
+    private @Nonnull Path getSourcePath(Path path) throws FileNotFoundException {
+        MappingEntry mappingEntry = fileMappingManager.mappingEntry(path.toString());
+        Preconditions.checkNotNull(mappingEntry);
+        MappingEntrySource source = mappingEntry.getSource();
+        Path sourcePath = source.getFilePath();
+        if (sourcePath == null) {
+            throw new FileNotFoundException(
+                    String.format("Cannot get file path for source: %s", source));
         }
-        return delegateFS.getFileBlockLocations(file, start, len);
+        return sourcePath;
     }
 
     @Override
-    public FileStatus[] listStatus(Path path) throws IOException {
-        FileStatus[] localFiles = new FileStatus[0];
-        Tuple2<Boolean, Path> localPathTuple = tryBuildLocalPath(path);
-        if (localPathTuple.f0) {
-            localFiles = localFS.listStatus(localPathTuple.f1);
+    public synchronized FileStatus[] listStatus(Path path) throws IOException {
+        // mapping files
+        List<FileStatus> fileStatuses = new ArrayList<>();
+        String pathStr = path.toString();
+        if (!pathStr.endsWith("/")) {
+            pathStr += "/";
         }
-        int localFileNum = localFiles == null ? 0 : localFiles.length;
-        FileStatus[] remoteFiles = delegateFS.listStatus(path);
-        if (localFileNum == 0) {
-            return remoteFiles;
+        List<String> mappingFiles = fileMappingManager.listByPrefix(pathStr);
+        for (String mappingFile : mappingFiles) {
+            String relativePath = mappingFile.substring(pathStr.length());
+            int slashIndex = relativePath.indexOf('/');
+            if (slashIndex == -1) { // direct child
+                fileStatuses.add(getFileStatus(new Path(mappingFile)));
+            }
         }
-        int remoteFileNum = remoteFiles == null ? 0 : remoteFiles.length;
-        FileStatus[] fileStatuses = new FileStatus[localFileNum + remoteFileNum];
-        for (int index = 0; index < localFileNum; index++) {
-            final FileStatus localFile = localFiles[index];
-            fileStatuses[index] =
-                    new FileStatus() {
-                        @Override
-                        public long getLen() {
-                            return localFile.getLen();
-                        }
-
-                        @Override
-                        public long getBlockSize() {
-                            return localFile.getBlockSize();
-                        }
-
-                        @Override
-                        public short getReplication() {
-                            return localFile.getReplication();
-                        }
-
-                        @Override
-                        public long getModificationTime() {
-                            return localFile.getModificationTime();
-                        }
-
-                        @Override
-                        public long getAccessTime() {
-                            return localFile.getAccessTime();
-                        }
-
-                        @Override
-                        public boolean isDir() {
-                            return localFile.isDir();
-                        }
-
-                        @Override
-                        public Path getPath() {
-                            if (localFile.getPath().toString().length() == localBase.length()) {
-                                return new Path(remoteBase);
-                            }
-                            return new Path(
-                                    remoteBase,
-                                    localFile.getPath().toString().substring(localBase.length()));
-                        }
-                    };
-        }
-        if (remoteFileNum != 0) {
-            System.arraycopy(remoteFiles, 0, fileStatuses, localFileNum, remoteFileNum);
-        }
-        return fileStatuses;
+        return fileStatuses.toArray(new FileStatus[0]);
     }
 
     @Override
-    public boolean delete(Path path, boolean recursive) throws IOException {
-        boolean success = false;
-        Tuple2<Boolean, Path> localPathTuple = tryBuildLocalPath(path);
-        if (localPathTuple.f0) {
-            success = localFS.delete(localPathTuple.f1, recursive); // delete from local
+    public synchronized boolean delete(Path path, boolean recursive) throws IOException {
+        boolean success = fileMappingManager.deleteFileOrDirectory(path, recursive);
+        if (fileBasedCache != null) {
+            // only new generated file will put into cache, no need to consider file mapping
+            fileBasedCache.delete(path);
         }
-        success |= delegateFS.delete(path, recursive); // and delete from remote
         return success;
     }
 
     @Override
-    public boolean mkdirs(Path path) throws IOException {
-        boolean success = false;
-        Tuple2<Boolean, Path> localPathTuple = tryBuildLocalPath(path);
-        if (localPathTuple.f0) {
-            success = localFS.mkdirs(localPathTuple.f1);
-        }
-        success &= delegateFS.mkdirs(path);
-        return success;
+    public synchronized boolean mkdirs(Path path) throws IOException {
+        return delegateFS.mkdirs(path);
     }
 
     @Override
-    public boolean isDistributedFS() {
+    public synchronized boolean isDistributedFS() {
         return delegateFS.isDistributedFS();
     }
 
-    private Tuple2<Boolean, Path> tryBuildLocalPath(Path path) {
-        String remotePathStr = path.toString();
-        if (localFileFilter.apply(path.getName()) && remotePathStr.startsWith(remoteBase)) {
-            return Tuple2.of(
-                    true,
-                    remotePathStr.length() == remoteBase.length()
-                            ? new Path(localBase)
-                            : new Path(localBase, remotePathStr.substring(remoteBase.length())));
+    public synchronized int link(Path src, Path dst) throws IOException {
+        return fileMappingManager.link(src.toString(), dst.toString());
+    }
+
+    public synchronized int link(String src, Path dst) throws IOException {
+        return fileMappingManager.link(src, dst.toString());
+    }
+
+    public synchronized void registerReusedRestoredFile(
+            String key, StreamStateHandle stateHandle, Path dbFilePath) {
+        fileMappingManager.registerReusedRestoredFile(key, stateHandle, dbFilePath);
+    }
+
+    public synchronized @Nullable Path srcPath(Path path) {
+        MappingEntry mappingEntry = fileMappingManager.mappingEntry(path.toString());
+        return mappingEntry == null ? null : mappingEntry.getSourcePath();
+    }
+
+    public synchronized @Nullable MappingEntry getMappingEntry(Path path) {
+        return fileMappingManager.mappingEntry(path.toString());
+    }
+
+    public synchronized void giveUpOwnership(Path path, StreamStateHandle stateHandle) {
+        fileMappingManager.giveUpOwnership(path, stateHandle);
+    }
+
+    private @Nullable CachedDataOutputStream createCachedDataOutputStream(
+            Path dbFilePath, Path srcRealPath, FSDataOutputStream outputStream) throws IOException {
+        // do not create cache for local files
+        if (FileOwnershipDecider.shouldAlwaysBeLocal(dbFilePath)) {
+            return null;
         }
-        return Tuple2.of(false, null);
+
+        return fileBasedCache == null ? null : fileBasedCache.create(outputStream, srcRealPath);
+    }
+
+    private @Nullable CachedDataInputStream createCachedDataInputStream(
+            Path dbFilePath, MappingEntrySource source, FSDataInputStream inputStream)
+            throws IOException {
+        if (FileOwnershipDecider.shouldAlwaysBeLocal(dbFilePath) || !source.cacheable()) {
+            return null;
+        }
+
+        return fileBasedCache == null
+                ? null
+                : fileBasedCache.open(source.getFilePath(), inputStream);
+    }
+
+    public static class FileStatusWrapper implements FileStatus {
+        private final FileStatus delegate;
+        private final Path path;
+
+        public FileStatusWrapper(FileStatus delegate, Path path) {
+            this.delegate = delegate;
+            this.path = path;
+        }
+
+        @Override
+        public long getLen() {
+            return delegate.getLen();
+        }
+
+        @Override
+        public long getBlockSize() {
+            return delegate.getBlockSize();
+        }
+
+        @Override
+        public short getReplication() {
+            return delegate.getReplication();
+        }
+
+        @Override
+        public long getModificationTime() {
+            return delegate.getModificationTime();
+        }
+
+        @Override
+        public long getAccessTime() {
+            return delegate.getAccessTime();
+        }
+
+        @Override
+        public boolean isDir() {
+            return delegate.isDir();
+        }
+
+        @Override
+        public Path getPath() {
+            return path;
+        }
     }
 }

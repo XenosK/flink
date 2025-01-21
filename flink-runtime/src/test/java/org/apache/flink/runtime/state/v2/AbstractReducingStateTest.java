@@ -19,6 +19,7 @@
 package org.apache.flink.runtime.state.v2;
 
 import org.apache.flink.api.common.functions.ReduceFunction;
+import org.apache.flink.api.common.state.v2.ReducingStateDescriptor;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.runtime.asyncprocessing.AsyncExecutionController;
@@ -27,6 +28,7 @@ import org.apache.flink.runtime.asyncprocessing.StateExecutor;
 import org.apache.flink.runtime.asyncprocessing.StateRequest;
 import org.apache.flink.runtime.asyncprocessing.StateRequestContainer;
 import org.apache.flink.runtime.asyncprocessing.StateRequestType;
+import org.apache.flink.runtime.asyncprocessing.declare.DeclarationManager;
 import org.apache.flink.runtime.mailbox.SyncMailboxExecutor;
 import org.apache.flink.util.Preconditions;
 
@@ -84,10 +86,12 @@ public class AbstractReducingStateTest extends AbstractKeyedStateTestBase {
                         new SyncMailboxExecutor(),
                         (a, b) -> {},
                         new ReducingStateExecutor(),
+                        new DeclarationManager(),
                         1,
                         100,
                         10000,
                         1,
+                        null,
                         null);
         AbstractReducingState<String, String, Integer> reducingState =
                 new AbstractReducingState<>(aec, descriptor);
@@ -181,6 +185,11 @@ public class AbstractReducingStateTest extends AbstractKeyedStateTestBase {
         @Override
         public StateRequestContainer createStateRequestContainer() {
             return new MockStateRequestContainer();
+        }
+
+        @Override
+        public void executeRequestSync(StateRequest<?, ?, ?, ?> stateRequest) {
+            throw new UnsupportedOperationException("Unsupported synchronous execution");
         }
 
         @Override

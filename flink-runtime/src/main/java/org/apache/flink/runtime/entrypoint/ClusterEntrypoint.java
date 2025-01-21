@@ -43,7 +43,6 @@ import org.apache.flink.runtime.blob.BlobUtils;
 import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.dispatcher.ExecutionGraphInfoStore;
-import org.apache.flink.runtime.dispatcher.MiniDispatcher;
 import org.apache.flink.runtime.entrypoint.component.DispatcherResourceManagerComponent;
 import org.apache.flink.runtime.entrypoint.component.DispatcherResourceManagerComponentFactory;
 import org.apache.flink.runtime.entrypoint.parser.CommandLineParser;
@@ -510,6 +509,7 @@ public abstract class ClusterEntrypoint implements AutoCloseableAsync, FatalErro
             if (executionGraphInfoStore != null) {
                 try {
                     executionGraphInfoStore.close();
+                    executionGraphInfoStore = null;
                 } catch (Throwable t) {
                     exception = ExceptionUtils.firstOrSuppressed(t, exception);
                 }
@@ -591,7 +591,9 @@ public abstract class ClusterEntrypoint implements AutoCloseableAsync, FatalErro
                             shutDownApplicationFuture, () -> stopClusterServices(cleanupHaData));
 
             final CompletableFuture<Void> rpcSystemClassLoaderCloseFuture =
-                    FutureUtils.runAfterwards(serviceShutdownFuture, rpcSystem::close);
+                    rpcSystem != null
+                            ? FutureUtils.runAfterwards(serviceShutdownFuture, rpcSystem::close)
+                            : FutureUtils.completedVoidFuture();
 
             final CompletableFuture<Void> cleanupDirectoriesFuture =
                     FutureUtils.runAfterwards(
@@ -742,7 +744,7 @@ public abstract class ClusterEntrypoint implements AutoCloseableAsync, FatalErro
         System.exit(returnCode);
     }
 
-    /** Execution mode of the {@link MiniDispatcher}. */
+    /** Execution mode of the dispatcher. */
     public enum ExecutionMode {
         /** Waits until the job result has been served. */
         NORMAL,

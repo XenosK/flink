@@ -161,11 +161,14 @@ keyword, thus must be escaped) in a catalog named 'cat.1' and database named 'db
     TableEnvironment.create_temporary_system_function
     TableEnvironment.create_temporary_table
     TableEnvironment.create_temporary_view
+    TableEnvironment.create_view
     TableEnvironment.drop_function
+    TableEnvironment.drop_table
     TableEnvironment.drop_temporary_function
     TableEnvironment.drop_temporary_system_function
     TableEnvironment.drop_temporary_table
     TableEnvironment.drop_temporary_view
+    TableEnvironment.drop_view
     TableEnvironment.execute_sql
     TableEnvironment.explain_sql
     TableEnvironment.from_descriptor
@@ -187,6 +190,7 @@ keyword, thus must be escaped) in a catalog named 'cat.1' and database named 'db
     TableEnvironment.list_user_defined_functions
     TableEnvironment.list_views
     TableEnvironment.load_module
+    TableEnvironment.create_catalog
     TableEnvironment.register_catalog
     TableEnvironment.set_python_requirements
     TableEnvironment.sql_query
@@ -243,6 +247,7 @@ StreamTableEnvironment
     StreamTableEnvironment.list_user_defined_functions
     StreamTableEnvironment.list_views
     StreamTableEnvironment.load_module
+    StreamTableEnvironment.create_catalog
     StreamTableEnvironment.register_catalog
     StreamTableEnvironment.set_python_requirements
     StreamTableEnvironment.sql_query

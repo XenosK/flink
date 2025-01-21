@@ -18,10 +18,10 @@
 
 package org.apache.flink.datastream.impl.operators;
 
-import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDeclaration;
 import org.apache.flink.api.common.state.StateDeclaration;
 import org.apache.flink.api.common.state.StateDeclarations;
+import org.apache.flink.api.common.state.v2.ListState;
 import org.apache.flink.api.common.typeinfo.TypeDescriptors;
 import org.apache.flink.datastream.api.common.Collector;
 import org.apache.flink.datastream.api.context.PartitionedContext;
@@ -61,7 +61,8 @@ public class MockListAppenderProcessFunction
     }
 
     @Override
-    public void processRecord(Integer record, Collector<Integer> output, PartitionedContext ctx)
+    public void processRecord(
+            Integer record, Collector<Integer> output, PartitionedContext<Integer> ctx)
             throws Exception {
         Optional<ListState<Integer>> stateOptional =
                 ctx.getStateManager().getState(listStateDeclaration);

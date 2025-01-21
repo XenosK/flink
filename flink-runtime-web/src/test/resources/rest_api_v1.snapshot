@@ -811,6 +811,9 @@
                 "additionalProperties" : {
                   "type" : "integer"
                 }
+              },
+              "pending-operators" : {
+                "type" : "integer"
               }
             }
           }
@@ -967,6 +970,13 @@
         "plan" : {
           "type" : "object",
           "id" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:RawJson"
+        },
+        "stream-graph" : {
+          "type" : "object",
+          "$ref" : "urn:jsonschema:org:apache:flink:runtime:rest:messages:JobPlanInfo:RawJson"
+        },
+        "pending-operators" : {
+          "type" : "integer"
         }
       }
     }

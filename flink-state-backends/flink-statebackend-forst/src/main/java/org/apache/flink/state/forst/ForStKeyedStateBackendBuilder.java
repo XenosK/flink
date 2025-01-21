@@ -18,8 +18,11 @@
 
 package org.apache.flink.state.forst;
 
+import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.core.execution.RecoveryClaimMode;
 import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.core.fs.Path;
 import org.apache.flink.core.memory.DataInputDeserializer;
 import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.metrics.MetricGroup;
@@ -39,13 +42,14 @@ import org.apache.flink.runtime.state.StateSerializerProvider;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueSetFactory;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueSnapshotRestoreWrapper;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
-import org.apache.flink.state.forst.fs.ForStFlinkFileSystem;
+import org.apache.flink.state.forst.datatransfer.ForStStateDataTransfer;
 import org.apache.flink.state.forst.restore.ForStHeapTimersFullRestoreOperation;
 import org.apache.flink.state.forst.restore.ForStIncrementalRestoreOperation;
 import org.apache.flink.state.forst.restore.ForStNoneRestoreOperation;
 import org.apache.flink.state.forst.restore.ForStRestoreOperation;
 import org.apache.flink.state.forst.restore.ForStRestoreResult;
 import org.apache.flink.state.forst.snapshot.ForStIncrementalSnapshotStrategy;
+import org.apache.flink.state.forst.snapshot.ForStNativeFullSnapshotStrategy;
 import org.apache.flink.state.forst.snapshot.ForStSnapshotStrategyBase;
 import org.apache.flink.state.forst.sync.ForStPriorityQueueConfig;
 import org.apache.flink.util.CollectionUtil;
@@ -62,8 +66,6 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nonnegative;
 import javax.annotation.Nonnull;
 
-import java.io.File;
-import java.io.IOException;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -72,6 +74,8 @@ import java.util.TreeMap;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.function.Supplier;
+
+import static org.apache.flink.state.forst.ForStConfigurableOptions.WRITE_BATCH_SIZE;
 
 /**
  * Builder class for {@link ForStKeyedStateBackend} which handles all necessary initializations and
@@ -88,6 +92,8 @@ public class ForStKeyedStateBackendBuilder<K>
 
     private static final int VALUE_SERIALIZER_BUFFER_START_SIZE = 128;
 
+    private long writeBatchSize = WRITE_BATCH_SIZE.defaultValue().getBytes();
+
     /** String that identifies the operator that owns this backend. */
     private final String operatorIdentifier;
 
@@ -102,6 +108,7 @@ public class ForStKeyedStateBackendBuilder<K>
 
     private final int numberOfKeyGroups;
     private final KeyGroupRange keyGroupRange;
+    private final ExecutionConfig executionConfig;
     private final TtlTimeProvider ttlTimeProvider;
 
     private final Collection<KeyedStateHandle> restoreStateHandles;
@@ -121,6 +128,13 @@ public class ForStKeyedStateBackendBuilder<K>
     /** ForSt property-based and statistics-based native metrics options. */
     private ForStNativeMetricOptions nativeMetricOptions;
 
+    private boolean rescalingUseDeleteFilesInRange = false;
+
+    private double overlapFractionThreshold = 0.5;
+    private boolean useIngestDbRestoreMode = false;
+
+    private RecoveryClaimMode recoveryClaimMode = RecoveryClaimMode.DEFAULT;
+
     public ForStKeyedStateBackendBuilder(
             String operatorIdentifier,
             ClassLoader userCodeClassLoader,
@@ -129,6 +143,7 @@ public class ForStKeyedStateBackendBuilder<K>
             TypeSerializer<K> keySerializer,
             int numberOfKeyGroups,
             KeyGroupRange keyGroupRange,
+            ExecutionConfig executionConfig,
             ForStPriorityQueueConfig priorityQueueConfig,
             TtlTimeProvider ttlTimeProvider,
             MetricGroup metricGroup,
@@ -143,6 +158,7 @@ public class ForStKeyedStateBackendBuilder<K>
                 StateSerializerProvider.fromNewRegisteredSerializer(keySerializer);
         this.numberOfKeyGroups = numberOfKeyGroups;
         this.keyGroupRange = keyGroupRange;
+        this.executionConfig = executionConfig;
         this.priorityQueueConfig = priorityQueueConfig;
         this.ttlTimeProvider = ttlTimeProvider;
         this.metricGroup = metricGroup;
@@ -164,6 +180,27 @@ public class ForStKeyedStateBackendBuilder<K>
         return this;
     }
 
+    ForStKeyedStateBackendBuilder<K> setOverlapFractionThreshold(double overlapFractionThreshold) {
+        this.overlapFractionThreshold = overlapFractionThreshold;
+        return this;
+    }
+
+    ForStKeyedStateBackendBuilder<K> setUseIngestDbRestoreMode(boolean useIngestDbRestoreMode) {
+        this.useIngestDbRestoreMode = useIngestDbRestoreMode;
+        return this;
+    }
+
+    ForStKeyedStateBackendBuilder<K> setRescalingUseDeleteFilesInRange(
+            boolean rescalingUseDeleteFilesInRange) {
+        this.rescalingUseDeleteFilesInRange = rescalingUseDeleteFilesInRange;
+        return this;
+    }
+
+    ForStKeyedStateBackendBuilder<K> setRecoveryClaimMode(RecoveryClaimMode recoveryClaimMode) {
+        this.recoveryClaimMode = recoveryClaimMode;
+        return this;
+    }
+
     @Override
     public ForStKeyedStateBackend<K> build() throws BackendBuildingException {
         ColumnFamilyHandle defaultColumnFamilyHandle = null;
@@ -171,7 +208,7 @@ public class ForStKeyedStateBackendBuilder<K>
 
         CloseableRegistry cancelStreamRegistryForBackend = new CloseableRegistry();
 
-        LinkedHashMap<String, ForStKeyedStateBackend.ForStKvStateInfo> kvStateInformation =
+        LinkedHashMap<String, ForStOperationUtils.ForStKvStateInfo> kvStateInformation =
                 new LinkedHashMap<>();
         LinkedHashMap<String, HeapPriorityQueueSnapshotRestoreWrapper<?>> registeredPQStates =
                 new LinkedHashMap<>();
@@ -211,7 +248,12 @@ public class ForStKeyedStateBackendBuilder<K>
 
         try {
             optionsContainer.prepareDirectories();
-            restoreOperation = getForStRestoreOperation(kvStateInformation, registeredPQStates);
+            restoreOperation =
+                    getForStRestoreOperation(
+                            keyGroupPrefixBytes,
+                            kvStateInformation,
+                            registeredPQStates,
+                            ttlCompactFiltersManager);
             ForStRestoreResult restoreResult = restoreOperation.restore();
             db = restoreResult.getDb();
             defaultColumnFamilyHandle = restoreResult.getDefaultColumnFamilyHandle();
@@ -272,6 +314,7 @@ public class ForStKeyedStateBackendBuilder<K>
                 optionsContainer.getRemoteBasePath());
         return new ForStKeyedStateBackend<>(
                 backendUID,
+                executionConfig,
                 this.optionsContainer,
                 keyGroupPrefixBytes,
                 this.keySerializerProvider.currentSchemaSerializer(),
@@ -293,18 +336,20 @@ public class ForStKeyedStateBackendBuilder<K>
     }
 
     private ForStRestoreOperation getForStRestoreOperation(
-            LinkedHashMap<String, ForStKeyedStateBackend.ForStKvStateInfo> kvStateInformation,
-            LinkedHashMap<String, HeapPriorityQueueSnapshotRestoreWrapper<?>> registeredPQStates) {
+            int keyGroupPrefixBytes,
+            LinkedHashMap<String, ForStOperationUtils.ForStKvStateInfo> kvStateInformation,
+            LinkedHashMap<String, HeapPriorityQueueSnapshotRestoreWrapper<?>> registeredPQStates,
+            ForStDBTtlCompactFiltersManager ttlCompactFiltersManager) {
         // Currently, ForStDB does not support mixing local-dir and remote-dir, and ForStDB will
         // concatenates the dfs directory with the local directory as working dir when using flink
         // env. We expect to directly use the dfs directory in flink env or local directory as
         // working dir. We will implement this in ForStDB later, but before that, we achieved this
         // by setting the dbPath to "/" when the dfs directory existed.
         // TODO: use localForStPath as dbPath after ForSt Support mixing local-dir and remote-dir
-        File instanceForStPath =
+        Path instanceForStPath =
                 optionsContainer.getRemoteForStPath() == null
                         ? optionsContainer.getLocalForStPath()
-                        : new File("/");
+                        : new Path("/db");
 
         if (CollectionUtil.isEmptyOrAllElementsNull(restoreStateHandles)) {
             return new ForStNoneRestoreOperation(
@@ -313,13 +358,17 @@ public class ForStKeyedStateBackendBuilder<K>
                     optionsContainer.getDbOptions(),
                     columnFamilyOptionsFactory,
                     nativeMetricOptions,
-                    metricGroup);
+                    metricGroup,
+                    ttlCompactFiltersManager,
+                    writeBatchSize,
+                    optionsContainer.getWriteBufferManagerCapacity());
         }
         KeyedStateHandle firstStateHandle = restoreStateHandles.iterator().next();
         if (firstStateHandle instanceof IncrementalRemoteKeyedStateHandle) {
             return new ForStIncrementalRestoreOperation<>(
                     operatorIdentifier,
                     keyGroupRange,
+                    keyGroupPrefixBytes,
                     cancelStreamRegistry,
                     userCodeClassLoader,
                     kvStateInformation,
@@ -331,9 +380,16 @@ public class ForStKeyedStateBackendBuilder<K>
                     columnFamilyOptionsFactory,
                     nativeMetricOptions,
                     metricGroup,
+                    ttlCompactFiltersManager,
+                    writeBatchSize,
+                    optionsContainer.getWriteBufferManagerCapacity(),
                     customInitializationMetrics,
                     CollectionUtil.checkedSubTypeCast(
-                            restoreStateHandles, IncrementalRemoteKeyedStateHandle.class));
+                            restoreStateHandles, IncrementalRemoteKeyedStateHandle.class),
+                    overlapFractionThreshold,
+                    useIngestDbRestoreMode,
+                    rescalingUseDeleteFilesInRange,
+                    recoveryClaimMode);
         } else if (priorityQueueConfig.getPriorityQueueStateType()
                 == ForStStateBackend.PriorityQueueStateType.HEAP) {
             // Note: This branch can be touched after ForSt Support canonical savepoint,
@@ -351,6 +407,9 @@ public class ForStKeyedStateBackendBuilder<K>
                     columnFamilyOptionsFactory,
                     nativeMetricOptions,
                     metricGroup,
+                    ttlCompactFiltersManager,
+                    writeBatchSize,
+                    optionsContainer.getWriteBufferManagerCapacity(),
                     restoreStateHandles,
                     cancelStreamRegistry);
         }
@@ -363,48 +422,45 @@ public class ForStKeyedStateBackendBuilder<K>
             @Nonnull RocksDB db,
             @Nonnull ResourceGuard forstResourceGuard,
             @Nonnull TypeSerializer<K> keySerializer,
-            @Nonnull
-                    LinkedHashMap<String, ForStKeyedStateBackend.ForStKvStateInfo>
-                            kvStateInformation,
+            @Nonnull LinkedHashMap<String, ForStOperationUtils.ForStKvStateInfo> kvStateInformation,
             @Nonnull KeyGroupRange keyGroupRange,
             @Nonnegative int keyGroupPrefixBytes,
             @Nonnull UUID backendUID,
             @Nonnull
                     SortedMap<Long, Collection<IncrementalKeyedStateHandle.HandleAndLocalPath>>
                             uploadedStateHandles,
-            long lastCompletedCheckpointId)
-            throws IOException {
-
-        ForStSnapshotStrategyBase<K, ?> snapshotStrategy;
-
-        ForStFlinkFileSystem forStFs =
-                optionsContainer.getRemoteForStPath() != null
-                        ? (ForStFlinkFileSystem)
-                                ForStFlinkFileSystem.get(
-                                        optionsContainer.getRemoteForStPath().toUri())
-                        : null;
+            long lastCompletedCheckpointId) {
         ForStStateDataTransfer stateTransfer =
-                new ForStStateDataTransfer(ForStStateDataTransfer.DEFAULT_THREAD_NUM, forStFs);
+                new ForStStateDataTransfer(
+                        ForStStateDataTransfer.DEFAULT_THREAD_NUM,
+                        optionsContainer.getFileSystem());
 
         if (enableIncrementalCheckpointing) {
-            snapshotStrategy =
-                    new ForStIncrementalSnapshotStrategy<>(
-                            db,
-                            forstResourceGuard,
-                            optionsContainer,
-                            keySerializer,
-                            kvStateInformation,
-                            keyGroupRange,
-                            keyGroupPrefixBytes,
-                            backendUID,
-                            uploadedStateHandles,
-                            stateTransfer,
-                            lastCompletedCheckpointId);
+            return new ForStIncrementalSnapshotStrategy<>(
+                    db,
+                    forstResourceGuard,
+                    optionsContainer,
+                    keySerializer,
+                    kvStateInformation,
+                    keyGroupRange,
+                    keyGroupPrefixBytes,
+                    backendUID,
+                    uploadedStateHandles,
+                    stateTransfer,
+                    lastCompletedCheckpointId);
 
         } else {
-            throw new UnsupportedOperationException("Not implemented yet for ForStStateBackend");
+            return new ForStNativeFullSnapshotStrategy<>(
+                    db,
+                    forstResourceGuard,
+                    optionsContainer,
+                    keySerializer,
+                    kvStateInformation,
+                    keyGroupRange,
+                    keyGroupPrefixBytes,
+                    backendUID,
+                    stateTransfer);
         }
-        return snapshotStrategy;
     }
 
     private HeapPriorityQueueSetFactory createHeapQueueFactory() {

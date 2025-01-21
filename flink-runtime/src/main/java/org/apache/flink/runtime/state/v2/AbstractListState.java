@@ -18,12 +18,14 @@
 package org.apache.flink.runtime.state.v2;
 
 import org.apache.flink.api.common.state.v2.ListState;
+import org.apache.flink.api.common.state.v2.ListStateDescriptor;
 import org.apache.flink.api.common.state.v2.StateFuture;
 import org.apache.flink.api.common.state.v2.StateIterator;
 import org.apache.flink.runtime.asyncprocessing.StateRequestHandler;
 import org.apache.flink.runtime.asyncprocessing.StateRequestType;
 import org.apache.flink.runtime.state.v2.internal.InternalListState;
 
+import java.util.Collection;
 import java.util.List;
 
 /**
@@ -82,5 +84,17 @@ public class AbstractListState<K, N, V> extends AbstractKeyedState<K, N, V>
     @Override
     public void addAll(List<V> values) {
         handleRequestSync(StateRequestType.LIST_ADD_ALL, values);
+    }
+
+    @Override
+    public StateFuture<Void> asyncMergeNamespaces(N target, Collection<N> sources) {
+        throw new UnsupportedOperationException(
+                getClass() + " has not implement the asyncMergeNamespaces().");
+    }
+
+    @Override
+    public void mergeNamespaces(N target, Collection<N> sources) {
+        throw new UnsupportedOperationException(
+                getClass() + " has not implement the mergeNamespaces().");
     }
 }

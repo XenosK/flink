@@ -123,6 +123,17 @@ TableEnvironment API
     </tr>
     <tr>
       <td>
+        <strong>create_view(view_path, table, ignore_if_exists=False)</strong>
+      </td>
+      <td>
+        Registers a `Table` object as a view similar to SQL views. 
+      </td>
+      <td class="text-center">
+        {{< pythondoc file="pyflink.table.html#pyflink.table.TableEnvironment.create_view" name="link">}}
+      </td>
+    </tr>
+    <tr>
+      <td>
         <strong>drop_temporary_view(view_path)</strong>
       </td>
       <td>
@@ -130,6 +141,39 @@ TableEnvironment API
       </td>
       <td class="text-center">
         {{< pythondoc file="pyflink.table.html#pyflink.table.TableEnvironment.drop_temporary_view" name="链接">}}
+      </td>
+    </tr>
+    <tr>
+      <td>
+        <strong>drop_view(view_path, ignore_if_not_exists=True)</strong>
+      </td>
+      <td>
+        Drops a view registered in the given path.
+      </td>
+      <td class="text-center">
+        {{< pythondoc file="pyflink.table.html#pyflink.table.TableEnvironment.drop_view" name="link">}}
+      </td>
+    </tr>
+    <tr>
+      <td>
+        <strong>create_temporary_table(path, table_descriptor, ignore_if_exists=False)</strong>
+      </td>
+      <td>
+        Registers a `Table` object as a temporary catalog table similar to SQL temporary tables. 
+      </td>
+      <td class="text-center">
+        {{< pythondoc file="pyflink.table.html#pyflink.table.TableEnvironment.create_temporary_table" name="link">}}
+      </td>
+    </tr>
+    <tr>
+      <td>
+        <strong>create_table(path, table_descriptor, ignore_if_exists=False)</strong>
+      </td>
+      <td>
+        Registers a `Table` object as a catalog table similar to SQL tables. 
+      </td>
+      <td class="text-center">
+        {{< pythondoc file="pyflink.table.html#pyflink.table.TableEnvironment.create_table" name="link">}}
       </td>
     </tr>
     <tr>
@@ -142,6 +186,17 @@ TableEnvironment API
       </td>
       <td class="text-center">
         {{< pythondoc file="pyflink.table.html#pyflink.table.TableEnvironment.drop_temporary_table" name="链接">}}
+      </td>
+    </tr>
+    <tr>
+      <td>
+        <strong>drop_table(table_path, ignore_if_not_exists=True)</strong>
+      </td>
+      <td>
+        Drops a table registered under the given path.
+      </td>
+      <td class="text-center">
+        {{< pythondoc file="pyflink.table.html#pyflink.table.TableEnvironment.drop_table" name="link">}}
       </td>
     </tr>
     <tr>
@@ -184,17 +239,6 @@ TableEnvironment API
     </tr>
   </thead>
   <tbody>
-    <tr>
-      <td>
-        <strong>from_table_source(table_source)</strong>
-      </td>
-      <td>
-        通过 table source 创建一张表。
-      </td>
-      <td class="text-center">
-        {{< pythondoc file="pyflink.table.html#pyflink.table.TableEnvironment.from_table_source" name="链接">}}
-      </td>
-    </tr>
     <tr>
       <td>
         <strong>scan(*table_path)</strong>

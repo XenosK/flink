@@ -2155,6 +2155,7 @@ public final class BuiltInFunctionDefinitions {
             BuiltInFunctionDefinition.newBuilder()
                     .name("currentDate")
                     .sqlName("CURRENT_DATE")
+                    .callSyntax(SqlCallSyntax.NO_PARENTHESIS)
                     .kind(SCALAR)
                     .outputTypeStrategy(explicit(DATE().notNull()))
                     .build();
@@ -2163,6 +2164,7 @@ public final class BuiltInFunctionDefinitions {
             BuiltInFunctionDefinition.newBuilder()
                     .name("currentTime")
                     .sqlName("CURRENT_TIME")
+                    .callSyntax(SqlCallSyntax.NO_PARENTHESIS)
                     .kind(SCALAR)
                     .outputTypeStrategy(explicit(TIME().notNull()))
                     .build();
@@ -2170,6 +2172,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition LOCAL_TIME =
             BuiltInFunctionDefinition.newBuilder()
                     .name("localTime")
+                    .callSyntax(SqlCallSyntax.NO_PARENTHESIS)
                     .kind(SCALAR)
                     .outputTypeStrategy(explicit(TIME().notNull()))
                     .build();
@@ -2178,6 +2181,7 @@ public final class BuiltInFunctionDefinitions {
             BuiltInFunctionDefinition.newBuilder()
                     .name("currentTimestamp")
                     .sqlName("CURRENT_TIMESTAMP")
+                    .callSyntax(SqlCallSyntax.NO_PARENTHESIS)
                     .kind(SCALAR)
                     .outputTypeStrategy(explicit(TIMESTAMP_LTZ(3).notNull()))
                     .build();
@@ -2201,6 +2205,7 @@ public final class BuiltInFunctionDefinitions {
     public static final BuiltInFunctionDefinition LOCAL_TIMESTAMP =
             BuiltInFunctionDefinition.newBuilder()
                     .name("localTimestamp")
+                    .callSyntax(SqlCallSyntax.NO_PARENTHESIS)
                     .kind(SCALAR)
                     .outputTypeStrategy(explicit(TIMESTAMP(3).notNull()))
                     .build();
@@ -2327,14 +2332,25 @@ public final class BuiltInFunctionDefinitions {
 
     public static final BuiltInFunctionDefinition TO_TIMESTAMP_LTZ =
             BuiltInFunctionDefinition.newBuilder()
-                    .name("toTimestampLtz")
-                    .sqlName("TO_TIMESTAMP_LTZ")
+                    .name("TO_TIMESTAMP_LTZ")
                     .kind(SCALAR)
                     .inputTypeStrategy(
-                            sequence(
-                                    logical(LogicalTypeFamily.NUMERIC),
-                                    logical(LogicalTypeFamily.INTEGER_NUMERIC, false)))
+                            or(
+                                    sequence(logical(LogicalTypeFamily.CHARACTER_STRING)),
+                                    sequence(
+                                            logical(LogicalTypeFamily.CHARACTER_STRING),
+                                            logical(LogicalTypeFamily.CHARACTER_STRING)),
+                                    sequence(
+                                            logical(LogicalTypeFamily.CHARACTER_STRING),
+                                            logical(LogicalTypeFamily.CHARACTER_STRING),
+                                            logical(LogicalTypeFamily.CHARACTER_STRING)),
+                                    sequence(logical(LogicalTypeFamily.NUMERIC)),
+                                    sequence(
+                                            logical(LogicalTypeFamily.NUMERIC),
+                                            logical(LogicalTypeFamily.INTEGER_NUMERIC))))
                     .outputTypeStrategy(SpecificTypeStrategies.TO_TIMESTAMP_LTZ)
+                    .runtimeClass(
+                            "org.apache.flink.table.runtime.functions.scalar.ToTimestampLtzFunction")
                     .build();
 
     public static final BuiltInFunctionDefinition TO_TIMESTAMP =

@@ -20,6 +20,7 @@ package org.apache.flink.runtime.state.v2;
 
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.state.v2.AggregatingState;
+import org.apache.flink.api.common.state.v2.AggregatingStateDescriptor;
 import org.apache.flink.api.common.state.v2.StateFuture;
 import org.apache.flink.core.state.StateFutureUtils;
 import org.apache.flink.runtime.asyncprocessing.StateRequestHandler;
@@ -67,13 +68,13 @@ public class AbstractAggregatingState<K, N, IN, ACC, OUT> extends AbstractKeyedS
     @Override
     public StateFuture<Void> asyncAdd(IN value) {
         return asyncGetInternal()
-                .thenAccept(
+                .thenCompose(
                         acc -> {
                             final ACC safeAcc =
                                     (acc == null)
                                             ? this.aggregateFunction.createAccumulator()
                                             : acc;
-                            asyncUpdateInternal(this.aggregateFunction.add(value, safeAcc));
+                            return asyncUpdateInternal(this.aggregateFunction.add(value, safeAcc));
                         });
     }
 

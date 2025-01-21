@@ -27,7 +27,6 @@ import org.apache.flink.table.api._
 import org.apache.flink.table.api.PlanReference.{ContentPlanReference, FilePlanReference, ResourcePlanReference}
 import org.apache.flink.table.api.config.ExecutionConfigOptions
 import org.apache.flink.table.catalog._
-import org.apache.flink.table.catalog.ManagedTableListener.isManagedTable
 import org.apache.flink.table.connector.sink.DynamicTableSink
 import org.apache.flink.table.delegation._
 import org.apache.flink.table.factories.{DynamicTableSinkFactory, FactoryUtil, TableFactoryUtil}
@@ -469,19 +468,8 @@ abstract class PlannerBase(
         val isTemporary = contextResolvedTable.isTemporary
 
         if (
-          isStreamingMode && isManagedTable(catalog.orNull, resolvedTable) &&
-          !executor.isCheckpointingEnabled
-        ) {
-          throw new TableException(
-            s"You should enable the checkpointing for sinking to managed table " +
-              s"'$contextResolvedTable', managed table relies on checkpoint to commit and " +
-              s"the data is visible only after commit.")
-        }
-
-        if (
           !contextResolvedTable.isAnonymous &&
           TableFactoryUtil.isLegacyConnectorOptions(
-            catalogManager.getCatalog(objectIdentifier.getCatalogName).orElse(null),
             tableConfig,
             isStreamingMode,
             objectIdentifier,
@@ -490,7 +478,6 @@ abstract class PlannerBase(
           )
         ) {
           val tableSink = TableFactoryUtil.findAndCreateTableSink(
-            catalog.orNull,
             objectIdentifier,
             tableToFind,
             getTableConfig,
@@ -541,7 +528,7 @@ abstract class PlannerBase(
       staticPartitions: JMap[String, String],
       isOverwrite: Boolean): RelNode = {
     val input = createRelBuilder.queryOperation(queryOperation).build()
-    val table = catalogManager.resolveCatalogTable(createTableOperation.getCatalogTable)
+    val table = createTableOperation.getCatalogTable
 
     val identifier = createTableOperation.getTableIdentifier
     val catalog = toScala(catalogManager.getCatalog(identifier.getCatalogName))
