@@ -549,14 +549,6 @@ public abstract class SchedulerBase implements SchedulerNG, CheckpointScheduling
         return result;
     }
 
-    protected void transitionToScheduled(final List<ExecutionVertexID> verticesToDeploy) {
-        verticesToDeploy.forEach(
-                executionVertexId ->
-                        getExecutionVertex(executionVertexId)
-                                .getCurrentExecutionAttempt()
-                                .transitionState(ExecutionState.SCHEDULED));
-    }
-
     protected void setGlobalFailureCause(@Nullable final Throwable cause, long timestamp) {
         if (cause != null) {
             executionGraph.initFailureCause(cause, timestamp);
@@ -692,12 +684,13 @@ public abstract class SchedulerBase implements SchedulerNG, CheckpointScheduling
         final FlinkException cause = new FlinkException("Scheduler is being stopped.");
 
         final CompletableFuture<Void> checkpointServicesShutdownFuture =
-                FutureUtils.composeAfterwards(
+                FutureUtils.composeAfterwardsAsync(
                         executionGraph
                                 .getTerminationFuture()
                                 .thenAcceptAsync(
                                         this::shutDownCheckpointServices, getMainThreadExecutor()),
-                        checkpointsCleaner::closeAsync);
+                        checkpointsCleaner::closeAsync,
+                        getMainThreadExecutor());
 
         FutureUtils.assertNoException(checkpointServicesShutdownFuture);
 

@@ -21,6 +21,7 @@ import org.apache.flink.core.execution.RecoveryClaimMode;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
+import org.apache.flink.runtime.checkpoint.SnapshotType;
 import org.apache.flink.runtime.state.CheckpointStateOutputStream;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
 import org.apache.flink.runtime.state.CheckpointedStateScope;
@@ -91,16 +92,22 @@ public class ForStStateDataTransfer implements Closeable {
      *     will be transferred.
      */
     public HandleAndLocalPath transferFileToCheckpointFs(
+            SnapshotType.SharingFilesStrategy sharingFilesStrategy,
             Path file,
             long transferBytes,
             CheckpointStreamFactory checkpointStreamFactory,
             CheckpointedStateScope stateScope,
             CloseableRegistry snapshotCloseableRegistry,
-            CloseableRegistry tmpResourcesRegistry)
+            CloseableRegistry tmpResourcesRegistry,
+            boolean forceCopy)
             throws Exception {
 
         try {
+            DataTransferStrategy strategy =
+                    DataTransferStrategyBuilder.buildForSnapshot(
+                            sharingFilesStrategy, forStFs, checkpointStreamFactory, forceCopy);
             return createTransferFuture(
+                            strategy,
                             file,
                             transferBytes,
                             checkpointStreamFactory,
@@ -115,18 +122,23 @@ public class ForStStateDataTransfer implements Closeable {
 
     /** Transfer a batch of files to checkpoint filesystem. */
     public List<HandleAndLocalPath> transferFilesToCheckpointFs(
+            SnapshotType.SharingFilesStrategy sharingFilesStrategy,
             List<Path> files,
             CheckpointStreamFactory checkpointStreamFactory,
             CheckpointedStateScope stateScope,
             CloseableRegistry closeableRegistry,
-            CloseableRegistry tmpResourcesRegistry)
+            CloseableRegistry tmpResourcesRegistry,
+            boolean forceCopy)
             throws Exception {
-
+        DataTransferStrategy strategy =
+                DataTransferStrategyBuilder.buildForSnapshot(
+                        sharingFilesStrategy, forStFs, checkpointStreamFactory, forceCopy);
         List<CompletableFuture<HandleAndLocalPath>> futures =
                 files.stream()
                         .map(
                                 file ->
                                         createTransferFuture(
+                                                strategy,
                                                 file,
                                                 -1,
                                                 checkpointStreamFactory,
@@ -188,6 +200,7 @@ public class ForStStateDataTransfer implements Closeable {
     }
 
     private CompletableFuture<HandleAndLocalPath> createTransferFuture(
+            DataTransferStrategy strategy,
             Path file,
             long transferBytes,
             CheckpointStreamFactory checkpointStreamFactory,
@@ -197,7 +210,7 @@ public class ForStStateDataTransfer implements Closeable {
         return CompletableFuture.supplyAsync(
                 CheckedSupplier.unchecked(
                         () ->
-                                transferFile(
+                                strategy.transferToCheckpoint(
                                         file,
                                         transferBytes,
                                         checkpointStreamFactory,
@@ -209,27 +222,6 @@ public class ForStStateDataTransfer implements Closeable {
 
     private FileSystem getDbFileSystem() {
         return forStFs != null ? forStFs : FileSystem.getLocalFileSystem();
-    }
-
-    private HandleAndLocalPath transferFile(
-            Path filePath,
-            long maxTransferBytes,
-            CheckpointStreamFactory checkpointStreamFactory,
-            CheckpointedStateScope stateScope,
-            CloseableRegistry closeableRegistry,
-            CloseableRegistry tmpResourcesRegistry)
-            throws IOException {
-
-        DataTransferStrategy strategy =
-                DataTransferStrategyBuilder.buildForSnapshot(forStFs, checkpointStreamFactory);
-
-        return strategy.transferToCheckpoint(
-                filePath,
-                maxTransferBytes,
-                checkpointStreamFactory,
-                stateScope,
-                closeableRegistry,
-                tmpResourcesRegistry);
     }
 
     /**

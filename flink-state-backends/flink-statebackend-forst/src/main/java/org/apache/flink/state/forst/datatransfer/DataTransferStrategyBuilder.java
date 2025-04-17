@@ -21,16 +21,16 @@ import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.core.execution.RecoveryClaimMode;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
+import org.apache.flink.runtime.checkpoint.SnapshotType;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
 import org.apache.flink.runtime.state.CheckpointedStateScope;
 import org.apache.flink.runtime.state.IncrementalKeyedStateHandle;
 import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
 import org.apache.flink.runtime.state.StreamStateHandle;
 import org.apache.flink.runtime.state.filesystem.FileStateHandle;
-import org.apache.flink.runtime.state.filesystem.FsCheckpointStreamFactory;
+import org.apache.flink.runtime.state.filesystem.FsCheckpointStorageLocation;
 import org.apache.flink.state.forst.StateHandleTransferSpec;
 import org.apache.flink.state.forst.fs.ForStFlinkFileSystem;
-import org.apache.flink.state.forst.fs.filemapping.FileOwnershipDecider;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,20 +45,29 @@ public class DataTransferStrategyBuilder {
     private static final Logger LOG = LoggerFactory.getLogger(DataTransferStrategyBuilder.class);
 
     public static DataTransferStrategy buildForSnapshot(
+            SnapshotType.SharingFilesStrategy sharingFilesStrategy,
             @Nullable ForStFlinkFileSystem forStFlinkFileSystem,
-            @Nullable CheckpointStreamFactory checkpointStreamFactory) {
+            @Nullable CheckpointStreamFactory checkpointStreamFactory,
+            boolean forceCopy) {
         return buildForSnapshot(
+                sharingFilesStrategy,
                 forStFlinkFileSystem,
                 isDbPathUnderCheckpointPathForSnapshot(
-                        forStFlinkFileSystem, checkpointStreamFactory));
+                        forStFlinkFileSystem, checkpointStreamFactory),
+                forceCopy);
     }
 
     @VisibleForTesting
     static DataTransferStrategy buildForSnapshot(
+            SnapshotType.SharingFilesStrategy sharingFilesStrategy,
             @Nullable ForStFlinkFileSystem forStFlinkFileSystem,
-            boolean isDbPathUnderCheckpointPathForSnapshot) {
+            boolean isDbPathUnderCheckpointPathForSnapshot,
+            boolean forceCopy) {
         DataTransferStrategy strategy;
-        if (forStFlinkFileSystem == null || isDbPathUnderCheckpointPathForSnapshot) {
+        if (forceCopy
+                || sharingFilesStrategy == SnapshotType.SharingFilesStrategy.NO_SHARING
+                || forStFlinkFileSystem == null
+                || !isDbPathUnderCheckpointPathForSnapshot) {
             strategy =
                     forStFlinkFileSystem == null
                             ? new CopyDataTransferStrategy()
@@ -67,9 +76,7 @@ public class DataTransferStrategyBuilder {
             return strategy;
         }
 
-        strategy =
-                new ReusableDataTransferStrategy(
-                        FileOwnershipDecider.getDefault(), forStFlinkFileSystem);
+        strategy = new ReusableDataTransferStrategy(forStFlinkFileSystem);
         LOG.info("Build DataTransferStrategy for Snapshot: {}", strategy);
         return strategy;
     }
@@ -80,17 +87,17 @@ public class DataTransferStrategyBuilder {
         if (forStFlinkFileSystem == null) {
             return false;
         }
-        // For checkpoint other that FsCheckpointStorageAccess, we treat it as 'DB path not under
+        // For checkpoint other than FsCheckpointStorageAccess, we treat it as 'DB path not under
         // checkpoint path', since we cannot reuse checkpoint files in such case.
         // todo: Support enabling 'cp file reuse' with FsMergingCheckpointStorageAccess
         if (checkpointStreamFactory == null
-                || checkpointStreamFactory.getClass() != FsCheckpointStreamFactory.class) {
+                || checkpointStreamFactory.getClass() != FsCheckpointStorageLocation.class) {
             return false;
         }
 
         // get checkpoint shared path
-        FsCheckpointStreamFactory fsCheckpointStreamFactory =
-                (FsCheckpointStreamFactory) checkpointStreamFactory;
+        FsCheckpointStorageLocation fsCheckpointStreamFactory =
+                (FsCheckpointStorageLocation) checkpointStreamFactory;
         Path cpSharedPath = fsCheckpointStreamFactory.getTargetPath(CheckpointedStateScope.SHARED);
         FileSystem cpSharedFs;
         try {
@@ -101,13 +108,13 @@ public class DataTransferStrategyBuilder {
         }
 
         // check if dbRemotePath is under cpSharedPath
-        if (!cpSharedFs.equals(forStFlinkFileSystem.getDelegateFS())) {
+        if (!cpSharedFs.getUri().equals(forStFlinkFileSystem.getDelegateFS().getUri())) {
             // different file system
             return false;
         } else {
             // same file system
             String dbRemotePathStr = forStFlinkFileSystem.getRemoteBase();
-            String cpSharedPathStr = cpSharedPath.getPath();
+            String cpSharedPathStr = cpSharedPath.toString();
             return cpSharedPathStr.equals(dbRemotePathStr)
                     || dbRemotePathStr.startsWith(cpSharedPathStr);
         }
@@ -121,18 +128,22 @@ public class DataTransferStrategyBuilder {
         FileSystem cpSharedFs = getSharedStateFileSystem(specs);
         if (forStFlinkFileSystem == null
                 || cpSharedFs == null
-                || forStFlinkFileSystem.equals(cpSharedFs)) {
+                || !forStFlinkFileSystem.getUri().equals(cpSharedFs.getUri())
+                || recoveryClaimMode == RecoveryClaimMode.NO_CLAIM) {
             strategy =
                     forStFlinkFileSystem == null
                             ? new CopyDataTransferStrategy()
                             : new CopyDataTransferStrategy(forStFlinkFileSystem);
-            LOG.info("Build DataTransferStrategy for Restore: {}", strategy);
+            LOG.info(
+                    "Build DataTransferStrategy for Restore: {}, forStFlinkFileSystem: {}, cpSharedFs:{}, recoveryClaimMode:{}",
+                    strategy,
+                    forStFlinkFileSystem,
+                    cpSharedFs,
+                    recoveryClaimMode);
             return strategy;
         }
 
-        strategy =
-                new ReusableDataTransferStrategy(
-                        new FileOwnershipDecider(recoveryClaimMode), forStFlinkFileSystem);
+        strategy = new ReusableDataTransferStrategy(forStFlinkFileSystem);
         LOG.info("Build DataTransferStrategy for Restore: {}", strategy);
         return strategy;
     }

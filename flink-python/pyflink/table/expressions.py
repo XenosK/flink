@@ -30,10 +30,10 @@ __all__ = ['if_then_else', 'lit', 'col', 'range_', 'and_', 'or_', 'not_', 'UNBOU
            'current_watermark', 'local_time', 'local_timestamp',
            'temporal_overlaps', 'date_format', 'timestamp_diff', 'array', 'row', 'map_',
            'row_interval', 'pi', 'e', 'rand', 'rand_integer', 'atan2', 'negative', 'concat',
-           'concat_ws', 'uuid', 'null_of', 'log', 'with_columns', 'without_columns', 'json_string',
-           'json_object', 'json_object_agg', 'json_array', 'json_array_agg', 'call', 'call_sql',
-           'source_watermark', 'to_timestamp_ltz', 'from_unixtime', 'to_date', 'to_timestamp',
-           'convert_tz', 'unix_timestamp']
+           'concat_ws', 'uuid', 'null_of', 'log', 'with_columns', 'without_columns', 'json',
+           'json_string', 'json_object', 'json_object_agg', 'json_array', 'json_array_agg',
+           'call', 'call_sql', 'source_watermark', 'to_timestamp_ltz', 'from_unixtime', 'to_date',
+           'to_timestamp', 'convert_tz', 'unix_timestamp']
 
 
 def _leaf_op(op_name: str) -> Expression:
@@ -770,6 +770,39 @@ def without_columns(head, *tails) -> Expression:
     return _binary_op("withoutColumns", head, tails)
 
 
+def json(value) -> Expression:
+    """
+    Expects a raw, pre-formatted JSON string and returns its values as-is without escaping
+    it as a string.
+
+    This function can currently only be used within the `JSON_OBJECT` and `JSON_ARRAY` functions.
+    It allows passing pre-formatted JSON strings that will be inserted directly into the
+    resulting JSON structure rather than being escaped as a string value. This allows storing
+    nested JSON structures in a `JSON_OBJECT` or `JSON_ARRAY` without processing them as strings,
+    which is often useful when ingesting already formatted json data. If the value is NULL or
+    empty, the function returns NULL.
+
+    Examples:
+    ::
+
+        >>> # {"nested":{"value":42}}
+        >>> json_object(JsonOnNull.NULL, "nested", json('{"value": 42}'))
+
+        >>> # {"K": null}
+        >>> json_object(JsonOnNull.NULL, "K", json(''))
+
+        >>> # [{"nested":{"value":42}}]
+        >>> json_array(JsonOnNull.NULL, json('{"nested":{"value": 42}}'))
+
+        >>> # [null]
+        >>> json_array(JsonOnNull.NULL, json(''))
+
+        >>> # Invalid - JSON function can only be used within JSON_OBJECT
+        >>> json('{"value": 42}')
+    """
+    return _unary_op("json", value)
+
+
 def json_string(value) -> Expression:
     """
     Serializes a value into JSON.
@@ -816,8 +849,12 @@ def json_object(on_null: JsonOnNull = JsonOnNull.NULL, *args) -> Expression:
         >>> json_object(JsonOnNull.ABSENT, "K1", null_of(DataTypes.STRING())) # '{}'
 
         >>> # '{"K1":{"K2":"V"}}'
+        >>> json_object(JsonOnNull.NULL, "K1", json('{"K2":"V"}'))
+
+        >>> # '{"K1":{"K2":"V"}}'
         >>> json_object(JsonOnNull.NULL, "K1", json_object(JsonOnNull.NULL, "K2", "V"))
 
+    .. seealso:: :func:`~pyflink.table.expressions.json`
     .. seealso:: :func:`~pyflink.table.expressions.json_array`
     """
     return _varargs_op("jsonObject", *(on_null._to_j_json_on_null(), *args))
@@ -871,6 +908,10 @@ def json_array(on_null: JsonOnNull = JsonOnNull.ABSENT, *args) -> Expression:
 
         >>> json_array(JsonOnNull.NULL, json_array(JsonOnNull.NULL, 1)) # '[[1]]'
 
+        # '[{"nested_json":{"value":42}}]'
+        >>> json_array(JsonOnNull.NULL, json('{"nested_json": {"value": 42}}'))
+
+    .. seealso:: :func:`~pyflink.table.expressions.json`
     .. seealso:: :func:`~pyflink.table.expressions.json_object`
     """
     return _varargs_op("jsonArray", *(on_null._to_j_json_on_null(), *args))

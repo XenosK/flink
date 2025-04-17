@@ -52,7 +52,13 @@ public final class QueryOperationCatalogView implements CatalogView {
 
     @Override
     public Schema getUnresolvedSchema() {
-        return Schema.newBuilder().fromResolvedSchema(queryOperation.getResolvedSchema()).build();
+        return Optional.ofNullable(originalView)
+                .map(CatalogView::getUnresolvedSchema)
+                .orElseGet(
+                        () ->
+                                Schema.newBuilder()
+                                        .fromResolvedSchema(queryOperation.getResolvedSchema())
+                                        .build());
     }
 
     @Override
@@ -109,5 +115,10 @@ public final class QueryOperationCatalogView implements CatalogView {
     @Internal
     public boolean supportsShowCreateView() {
         return originalView != null;
+    }
+
+    @Internal
+    public Optional<CatalogView> getOriginalView() {
+        return Optional.ofNullable(originalView);
     }
 }

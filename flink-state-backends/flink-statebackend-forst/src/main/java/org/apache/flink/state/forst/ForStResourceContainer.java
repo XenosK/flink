@@ -28,10 +28,8 @@ import org.apache.flink.core.fs.Path;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.memory.OpaqueMemoryResource;
 import org.apache.flink.runtime.state.CheckpointStorageAccess;
-import org.apache.flink.state.forst.datatransfer.DataTransferStrategy;
 import org.apache.flink.state.forst.fs.ForStFlinkFileSystem;
 import org.apache.flink.state.forst.fs.StringifiedForStFileSystem;
-import org.apache.flink.state.forst.fs.filemapping.FileOwnershipDecider;
 import org.apache.flink.util.FileUtils;
 import org.apache.flink.util.IOUtils;
 import org.apache.flink.util.Preconditions;
@@ -45,7 +43,6 @@ import org.forstdb.Filter;
 import org.forstdb.FlinkEnv;
 import org.forstdb.IndexType;
 import org.forstdb.PlainTableConfig;
-import org.forstdb.Priority;
 import org.forstdb.ReadOptions;
 import org.forstdb.Statistics;
 import org.forstdb.TableFormatConfig;
@@ -85,8 +82,6 @@ public final class ForStResourceContainer implements AutoCloseable {
     // and the db data dir's absolute path will be used as the log file name's prefix.
     private static final int INSTANCE_PATH_LENGTH_LIMIT = 255 - FORST_RELOCATE_LOG_SUFFIX.length();
 
-    @Nullable private FlinkEnv flinkEnv = null;
-
     @Nullable private final Path remoteBasePath;
 
     @Nullable private final Path remoteForStPath;
@@ -96,9 +91,10 @@ public final class ForStResourceContainer implements AutoCloseable {
     @Nullable private final Path localForStPath;
 
     @Nullable private Path cacheBasePath;
-    private long cacheCapacity;
 
-    private long cacheReservedSize;
+    private final long cacheCapacity;
+
+    private final long cacheReservedSize;
 
     /** The configurations from file. */
     private final ReadableConfig configuration;
@@ -108,12 +104,6 @@ public final class ForStResourceContainer implements AutoCloseable {
 
     /** The ForSt file system. Null when remote dir is not set. */
     @Nullable private ForStFlinkFileSystem forStFileSystem;
-
-    private final RecoveryClaimMode claimMode;
-
-    private final FileOwnershipDecider fileOwnershipDecider;
-
-    private DataTransferStrategy dataTransferStrategy;
 
     /**
      * The shared resource among ForSt instances. This resource is not part of the 'handlesToClose',
@@ -196,14 +186,12 @@ public final class ForStResourceContainer implements AutoCloseable {
         this.remoteBasePath = remoteBasePath;
         this.remoteForStPath =
                 remoteBasePath != null ? new Path(remoteBasePath, DB_DIR_STRING) : null;
-        this.claimMode = claimMode;
-        this.fileOwnershipDecider = new FileOwnershipDecider(claimMode);
 
         this.enableStatistics = enableStatistics;
         this.handlesToClose = new ArrayList<>();
         this.cacheBasePath = configuration.getOptional(CACHE_DIRECTORY).map(Path::new).orElse(null);
-        this.cacheCapacity = configuration.get(CACHE_SIZE_BASE_LIMIT);
-        this.cacheReservedSize = configuration.get(CACHE_RESERVED_SIZE);
+        this.cacheCapacity = configuration.get(CACHE_SIZE_BASE_LIMIT).getBytes();
+        this.cacheReservedSize = configuration.get(CACHE_RESERVED_SIZE).getBytes();
         this.metricGroup = metricGroup;
     }
 
@@ -239,11 +227,12 @@ public final class ForStResourceContainer implements AutoCloseable {
         // configured,
         //  fallback to local directory currently temporarily.
         if (remoteForStPath != null) {
-            flinkEnv =
+            FlinkEnv flinkEnv =
                     new FlinkEnv(
                             remoteBasePath.toString(),
                             new StringifiedForStFileSystem(forStFileSystem));
             opt.setEnv(flinkEnv);
+            handlesToClose.add(flinkEnv);
         }
 
         return opt;
@@ -397,9 +386,13 @@ public final class ForStResourceContainer implements AutoCloseable {
                     ForStFlinkFileSystem.get(
                             remoteForStPath.toUri(),
                             localForStPath,
-                            fileOwnershipDecider,
                             ForStFlinkFileSystem.getFileBasedCache(
-                                    cacheBasePath, cacheCapacity, cacheReservedSize, metricGroup));
+                                    configuration,
+                                    cacheBasePath,
+                                    remoteForStPath,
+                                    cacheCapacity,
+                                    cacheReservedSize,
+                                    metricGroup));
         } else {
             forStFileSystem = null;
         }
@@ -407,10 +400,6 @@ public final class ForStResourceContainer implements AutoCloseable {
 
     public @Nullable ForStFlinkFileSystem getFileSystem() {
         return forStFileSystem;
-    }
-
-    public DataTransferStrategy getDataTransferStrategy() {
-        return dataTransferStrategy;
     }
 
     private static void prepareDirectories(Path basePath, Path dbPath) throws IOException {
@@ -446,6 +435,12 @@ public final class ForStResourceContainer implements AutoCloseable {
         }
     }
 
+    public void forceClearRemoteDirectories() throws Exception {
+        if (remoteBasePath != null) {
+            clearDirectories(remoteBasePath);
+        }
+    }
+
     private static void clearDirectories(Path basePath) throws IOException {
         FileSystem fileSystem = basePath.getFileSystem();
         if (fileSystem.exists(basePath)) {
@@ -469,14 +464,8 @@ public final class ForStResourceContainer implements AutoCloseable {
             sharedResources.close();
         }
         cleanRelocatedDbLogs();
-        if (flinkEnv != null) {
-            // There is something wrong with the FlinkEnv, the background threads won't quit during
-            // the disposal of DB. We explicit shrink the thread pool here until the ForSt repo
-            // fixes that.
-            flinkEnv.setBackgroundThreads(0, Priority.LOW);
-            flinkEnv.setBackgroundThreads(0, Priority.HIGH);
-            flinkEnv.close();
-            flinkEnv = null;
+        if (forStFileSystem != null) {
+            forStFileSystem.close();
         }
     }
 
@@ -579,6 +568,10 @@ public final class ForStResourceContainer implements AutoCloseable {
 
         currentOptions.setMinWriteBufferNumberToMerge(
                 internalGetOption(ForStConfigurableOptions.MIN_WRITE_BUFFER_NUMBER_TO_MERGE));
+
+        currentOptions.setPeriodicCompactionSeconds(
+                internalGetOption(ForStConfigurableOptions.COMPACT_FILTER_PERIODIC_COMPACTION_TIME)
+                        .getSeconds());
 
         TableFormatConfig tableFormatConfig = currentOptions.tableFormatConfig();
 

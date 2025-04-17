@@ -50,6 +50,8 @@ import org.apache.flink.table.catalog.listener.DropModelEvent;
 import org.apache.flink.table.catalog.listener.DropTableEvent;
 import org.apache.flink.table.delegation.Parser;
 import org.apache.flink.table.delegation.Planner;
+import org.apache.flink.table.expressions.DefaultSqlFactory;
+import org.apache.flink.table.expressions.SqlFactory;
 import org.apache.flink.table.expressions.resolver.ExpressionResolver.ExpressionResolverBuilder;
 import org.apache.flink.table.factories.FactoryUtil;
 import org.apache.flink.table.operations.Operation;
@@ -119,12 +121,15 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
 
     private final CatalogStoreHolder catalogStoreHolder;
 
+    private SqlFactory sqlFactory;
+
     private CatalogManager(
             String defaultCatalogName,
             Catalog defaultCatalog,
             DataTypeFactory typeFactory,
             List<CatalogModificationListener> catalogModificationListeners,
-            CatalogStoreHolder catalogStoreHolder) {
+            CatalogStoreHolder catalogStoreHolder,
+            SqlFactory sqlFactory) {
         checkArgument(
                 !StringUtils.isNullOrWhitespaceOnly(defaultCatalogName),
                 "Default catalog name cannot be null or empty");
@@ -145,6 +150,8 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
         this.catalogModificationListeners = catalogModificationListeners;
 
         this.catalogStoreHolder = catalogStoreHolder;
+
+        this.sqlFactory = sqlFactory;
     }
 
     @VisibleForTesting
@@ -179,6 +186,8 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
         private List<CatalogModificationListener> catalogModificationListeners =
                 Collections.emptyList();
         private CatalogStoreHolder catalogStoreHolder;
+
+        private SqlFactory sqlFactory = DefaultSqlFactory.INSTANCE;
 
         public Builder classLoader(ClassLoader classLoader) {
             this.classLoader = classLoader;
@@ -217,6 +226,11 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
             return this;
         }
 
+        public Builder sqlFactory(SqlFactory sqlFactory) {
+            this.sqlFactory = checkNotNull(sqlFactory);
+            return this;
+        }
+
         public CatalogManager build() {
             checkNotNull(classLoader, "Class loader cannot be null");
             checkNotNull(config, "Config cannot be null");
@@ -233,7 +247,8 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                                             ? null
                                             : executionConfig.getSerializerConfig()),
                     catalogModificationListeners,
-                    catalogStoreHolder);
+                    catalogStoreHolder,
+                    sqlFactory);
         }
     }
 
@@ -305,6 +320,14 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
         return typeFactory;
     }
 
+    public SqlFactory getSqlFactory() {
+        return sqlFactory;
+    }
+
+    public void setSqlFactory(SqlFactory sqlFactory) {
+        this.sqlFactory = checkNotNull(sqlFactory);
+    }
+
     /**
      * Creates a catalog under the given name. The catalog name must be unique.
      *
@@ -331,13 +354,12 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                 throw new CatalogException(format("Catalog %s already exists.", catalogName));
             }
         } else {
-            // Store the catalog in the catalog store
-            catalogStoreHolder.catalogStore().storeCatalog(catalogName, catalogDescriptor);
-
             // Initialize and store the catalog in memory
             Catalog catalog = initCatalog(catalogName, catalogDescriptor);
             catalog.open();
             catalogs.put(catalogName, catalog);
+            // Store the catalog in the catalog store
+            catalogStoreHolder.catalogStore().storeCatalog(catalogName, catalogDescriptor);
         }
     }
 

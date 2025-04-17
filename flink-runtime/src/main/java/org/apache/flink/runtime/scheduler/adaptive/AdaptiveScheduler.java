@@ -95,6 +95,7 @@ import org.apache.flink.runtime.operators.coordination.TaskNotRunningException;
 import org.apache.flink.runtime.query.KvStateLocation;
 import org.apache.flink.runtime.query.UnknownKvStateLocation;
 import org.apache.flink.runtime.rpc.FatalErrorHandler;
+import org.apache.flink.runtime.scheduler.CoordinatorNotExistException;
 import org.apache.flink.runtime.scheduler.DefaultVertexParallelismInfo;
 import org.apache.flink.runtime.scheduler.DefaultVertexParallelismStore;
 import org.apache.flink.runtime.scheduler.ExecutionGraphFactory;
@@ -724,12 +725,15 @@ public class AdaptiveScheduler
 
         backgroundTask.abort();
         // wait for the background task to finish and then close services
-        return FutureUtils.composeAfterwards(
+        return FutureUtils.composeAfterwardsAsync(
                 FutureUtils.runAfterwardsAsync(
                         backgroundTask.getTerminationFuture(),
                         () -> stopCheckpointServicesSafely(jobTerminationFuture.get()),
                         getMainThreadExecutor()),
-                checkpointsCleaner::closeAsync);
+                // closing the CheckpointsCleaner can complete in the ioExecutor when cleaning up a
+                // PendingCheckpoint
+                checkpointsCleaner::closeAsync,
+                getMainThreadExecutor());
     }
 
     private void stopCheckpointServicesSafely(JobStatus terminalState) {
@@ -1052,10 +1056,7 @@ public class AdaptiveScheduler
                 .orElseGet(
                         () ->
                                 FutureUtils.completedExceptionally(
-                                        new FlinkException(
-                                                "Coordinator of operator "
-                                                        + operator
-                                                        + " does not exist")));
+                                        new CoordinatorNotExistException(operator)));
     }
 
     @Override
@@ -1246,7 +1247,7 @@ public class AdaptiveScheduler
             ExecutionGraphHandler executionGraphHandler,
             OperatorCoordinatorHandler operatorCoordinatorHandler,
             Duration backoffTime,
-            boolean forcedRestart,
+            @Nullable VertexParallelism restartWithParallelism,
             List<ExceptionHistoryEntry> failureCollection) {
 
         for (ExecutionVertex executionVertex : executionGraph.getAllExecutionVertices()) {
@@ -1267,7 +1268,7 @@ public class AdaptiveScheduler
                         operatorCoordinatorHandler,
                         LOG,
                         backoffTime,
-                        forcedRestart,
+                        restartWithParallelism,
                         userCodeClassLoader,
                         failureCollection));
 

@@ -333,6 +333,9 @@ public class ForStResourceContainerTest {
 
             optionsContainer.clearDirectories();
             assertFalse(new File(localBasePath.getPath()).exists());
+
+            assertTrue(new File(remoteBasePath.getPath()).exists());
+            optionsContainer.forceClearRemoteDirectories();
             assertFalse(new File(remoteBasePath.getPath()).exists());
         }
     }
@@ -347,7 +350,7 @@ public class ForStResourceContainerTest {
         DBOptions dbOptions2 =
                 new DBOptions().setCreateIfMissing(true).setAvoidFlushDuringShutdown(true);
         ForStFlinkFileSystem fileSystem =
-                ForStFlinkFileSystem.get(remoteBasePath.toUri(), localBasePath, null, null);
+                ForStFlinkFileSystem.get(remoteBasePath.toUri(), localBasePath, null);
         dbOptions2.setEnv(
                 new FlinkEnv(
                         remoteBasePath.toString(), new StringifiedForStFileSystem(fileSystem)));

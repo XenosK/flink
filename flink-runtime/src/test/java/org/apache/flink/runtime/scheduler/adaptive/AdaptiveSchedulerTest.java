@@ -102,6 +102,7 @@ import org.apache.flink.runtime.scheduler.VertexParallelismInformation;
 import org.apache.flink.runtime.scheduler.VertexParallelismStore;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.TestingSlot;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.TestingSlotAllocator;
+import org.apache.flink.runtime.scheduler.adaptive.allocator.VertexParallelism;
 import org.apache.flink.runtime.scheduler.exceptionhistory.ExceptionHistoryEntry;
 import org.apache.flink.runtime.scheduler.exceptionhistory.RootExceptionHistoryEntry;
 import org.apache.flink.runtime.slots.ResourceRequirement;
@@ -120,7 +121,6 @@ import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.IterableUtils;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.concurrent.FutureUtils;
-import org.apache.flink.util.jackson.JacksonMapperFactory;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -162,6 +162,7 @@ import java.util.stream.IntStream;
 import static org.apache.flink.core.testutils.FlinkAssertions.assertThatFuture;
 import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.createExecutionAttemptId;
 import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.createNoOpVertex;
+import static org.apache.flink.runtime.jobgraph.JobGraphTestUtils.singleNoOpJobGraph;
 import static org.apache.flink.runtime.jobgraph.JobGraphTestUtils.streamingJobGraph;
 import static org.apache.flink.runtime.jobmaster.slotpool.SlotPoolTestUtils.createSlotOffersForResourceRequirements;
 import static org.apache.flink.runtime.jobmaster.slotpool.SlotPoolTestUtils.offerSlots;
@@ -457,12 +458,7 @@ public class AdaptiveSchedulerTest {
         assertThat(executionGraph.getJobVertex(JOB_VERTEX.getID()).getParallelism())
                 .isEqualTo(numAvailableSlots);
 
-        assertThat(
-                        JacksonMapperFactory.createObjectMapper()
-                                .readTree(executionGraph.getJsonPlan())
-                                .get("nodes")
-                                .size())
-                .isOne();
+        assertThat(executionGraph.getPlan().getNodes().size()).isOne();
     }
 
     @Test
@@ -728,7 +724,8 @@ public class AdaptiveSchedulerTest {
                                     executionGraphHandler,
                                     operatorCoordinatorHandler,
                                     Duration.ZERO,
-                                    true,
+                                    new VertexParallelism(
+                                            Collections.singletonMap(JOB_VERTEX.getID(), 1)),
                                     failureCollection));
         }
 
@@ -1112,6 +1109,19 @@ public class AdaptiveSchedulerTest {
 
         assertThat(completedCheckpointStoreShutdownFuture.get()).isEqualTo(JobStatus.FAILED);
         assertThat(checkpointIdCounterShutdownFuture.get()).isEqualTo(JobStatus.FAILED);
+    }
+
+    @Test
+    void testCloseAsyncReturnsMainThreadFuture() throws Exception {
+        DefaultSchedulerTest.runCloseAsyncCompletesInMainThreadTest(
+                TEST_EXECUTOR_RESOURCE.getExecutor(),
+                (mainThreadExecutor, checkpointsCleaner) ->
+                        new AdaptiveSchedulerBuilder(
+                                        singleNoOpJobGraph(),
+                                        mainThreadExecutor,
+                                        EXECUTOR_RESOURCE.getExecutor())
+                                .setCheckpointCleaner(checkpointsCleaner)
+                                .build());
     }
 
     @Test
