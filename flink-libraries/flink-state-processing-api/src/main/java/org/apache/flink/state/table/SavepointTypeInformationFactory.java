@@ -16,23 +16,14 @@
  * limitations under the License.
  */
 
-package org.apache.flink.table.runtime.operators.process;
+package org.apache.flink.state.table;
 
-import org.apache.flink.annotation.Internal;
-import org.apache.flink.streaming.api.operators.Output;
-import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
-import org.apache.flink.table.connector.ChangelogMode;
-import org.apache.flink.table.data.RowData;
+import org.apache.flink.annotation.Experimental;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 
-/** Forwards all columns of the given row. */
-@Internal
-public class PassAllCollector extends PassThroughCollectorBase {
-
-    public PassAllCollector(Output<StreamRecord<RowData>> output, ChangelogMode changelogMode) {
-        super(output, changelogMode);
-    }
-
-    public void setPrefix(RowData input) {
-        prefix = input;
-    }
+/** {@link TypeInformation} factory for decoding savepoint value data. */
+@Experimental
+public interface SavepointTypeInformationFactory {
+    /** Returns {@link TypeInformation} for data deserialization. */
+    TypeInformation<?> getTypeInformation();
 }

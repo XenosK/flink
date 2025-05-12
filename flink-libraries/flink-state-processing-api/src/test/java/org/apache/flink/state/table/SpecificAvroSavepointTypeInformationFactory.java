@@ -16,23 +16,18 @@
  * limitations under the License.
  */
 
-package org.apache.flink.table.runtime.operators.process;
+package org.apache.flink.state.table;
 
-import org.apache.flink.annotation.Internal;
-import org.apache.flink.streaming.api.operators.Output;
-import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
-import org.apache.flink.table.connector.ChangelogMode;
-import org.apache.flink.table.data.RowData;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.formats.avro.typeutils.AvroTypeInfo;
 
-/** Forwards all columns of the given row. */
-@Internal
-public class PassAllCollector extends PassThroughCollectorBase {
+import com.example.state.writer.job.schema.avro.AvroRecord;
 
-    public PassAllCollector(Output<StreamRecord<RowData>> output, ChangelogMode changelogMode) {
-        super(output, changelogMode);
-    }
-
-    public void setPrefix(RowData input) {
-        prefix = input;
+/** {@link SavepointTypeInformationFactory} for specific avro record. */
+public class SpecificAvroSavepointTypeInformationFactory
+        implements SavepointTypeInformationFactory {
+    @Override
+    public TypeInformation<?> getTypeInformation() {
+        return new AvroTypeInfo<>(AvroRecord.class);
     }
 }
