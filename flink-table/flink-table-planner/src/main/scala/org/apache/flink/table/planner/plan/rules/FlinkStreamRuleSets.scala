@@ -18,7 +18,7 @@
 package org.apache.flink.table.planner.plan.rules
 
 import org.apache.flink.table.planner.plan.nodes.logical._
-import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalProcessTableFunctionRule
+import org.apache.flink.table.planner.plan.nodes.physical.stream.{StreamPhysicalMLPredictTableFunctionRule, StreamPhysicalProcessTableFunctionRule}
 import org.apache.flink.table.planner.plan.rules.logical._
 import org.apache.flink.table.planner.plan.rules.physical.FlinkExpandConversionRule
 import org.apache.flink.table.planner.plan.rules.physical.stream._
@@ -417,7 +417,9 @@ object FlinkStreamRuleSets {
     // Avoid async calls which call async calls.
     AsyncCalcSplitRule.NESTED_SPLIT,
     // Avoid having async calls in multiple projections in a single calc.
-    AsyncCalcSplitRule.ONE_PER_CALC_SPLIT
+    AsyncCalcSplitRule.ONE_PER_CALC_SPLIT,
+    // Split async calls from correlates
+    AsyncCorrelateSplitRule.INSTANCE
   )
 
   /** RuleSet to do physical optimize for stream */
@@ -468,6 +470,8 @@ object FlinkStreamRuleSets {
     StreamPhysicalWindowDeduplicateRule.INSTANCE,
     // process table function
     StreamPhysicalProcessTableFunctionRule.INSTANCE,
+    // model TVFs
+    StreamPhysicalMLPredictTableFunctionRule.INSTANCE,
     // join
     StreamPhysicalJoinRule.INSTANCE,
     StreamPhysicalIntervalJoinRule.INSTANCE,
@@ -502,6 +506,11 @@ object FlinkStreamRuleSets {
   val MINI_BATCH_RULES: RuleSet = RuleSets.ofList(
     // mini-batch interval infer rule
     MiniBatchIntervalInferRule.INSTANCE
+  )
+
+  val DUPLICATE_CHANGES_RULES: RuleSet = RuleSets.ofList(
+    // duplicate changes infer rule
+    DuplicateChangesInferRule.INSTANCE
   )
 
   /** RuleSet to optimize plans after stream exec execution. */
