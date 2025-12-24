@@ -47,13 +47,16 @@ import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecSortLimit;
 import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecTableSourceScan;
 import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecUnion;
 import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecValues;
+import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecVectorSearchTableFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.batch.BatchExecWindowTableFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecAsyncCalc;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecAsyncCorrelate;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecCalc;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecChangelogNormalize;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecCorrelate;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecDataStreamScan;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecDeduplicate;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecDeltaJoin;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecDropUpdateBefore;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecExchange;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecExpand;
@@ -94,6 +97,7 @@ import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecTemporalJ
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecTemporalSort;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecUnion;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecValues;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecVectorSearchTableFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecWatermarkAssigner;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecWindowAggregate;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecWindowDeduplicate;
@@ -169,11 +173,14 @@ public final class ExecNodeMetadataUtil {
                     add(StreamExecPythonCalc.class);
                     add(StreamExecAsyncCalc.class);
                     add(StreamExecProcessTableFunction.class);
+                    add(StreamExecAsyncCorrelate.class);
                     add(StreamExecPythonCorrelate.class);
                     add(StreamExecPythonGroupAggregate.class);
                     add(StreamExecPythonGroupWindowAggregate.class);
                     add(StreamExecPythonOverAggregate.class);
                     add(StreamExecMLPredictTableFunction.class);
+                    add(StreamExecDeltaJoin.class);
+                    add(StreamExecVectorSearchTableFunction.class);
                     // Batch execution mode
                     add(BatchExecSink.class);
                     add(BatchExecTableSourceScan.class);
@@ -195,6 +202,7 @@ public final class ExecNodeMetadataUtil {
                     add(BatchExecMatch.class);
                     add(BatchExecOverAggregate.class);
                     add(BatchExecRank.class);
+                    add(BatchExecVectorSearchTableFunction.class);
                 }
             };
 

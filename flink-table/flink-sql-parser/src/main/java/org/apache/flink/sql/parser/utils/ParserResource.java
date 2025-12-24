@@ -28,14 +28,22 @@ public interface ParserResource {
     /** Resources. */
     ParserResource RESOURCE = Resources.create(ParserResource.class);
 
-    @Resources.BaseMessage("Multiple WATERMARK statements is not supported yet.")
+    @Resources.BaseMessage("Multiple WATERMARK declarations are not supported yet.")
     Resources.ExInst<ParseException> multipleWatermarksUnsupported();
 
     @Resources.BaseMessage("OVERWRITE expression is only used with INSERT statement.")
     Resources.ExInst<ParseException> overwriteIsOnlyUsedWithInsert();
 
     @Resources.BaseMessage(
-            "CREATE SYSTEM FUNCTION is not supported, system functions can only be registered as temporary function, you can use CREATE TEMPORARY SYSTEM FUNCTION instead.")
+            "CREATE SYSTEM CONNECTION is not supported, system connections can only be registered as temporary connections, you can use CREATE TEMPORARY SYSTEM CONNECTION instead.")
+    Resources.ExInst<ParseException> createSystemConnectionOnlySupportTemporary();
+
+    @Resources.BaseMessage(
+            "DROP SYSTEM CONNECTION is not supported, system connections can only be dropped as temporary connections, you can use DROP TEMPORARY SYSTEM CONNECTION instead.")
+    Resources.ExInst<ParseException> dropSystemConnectionOnlySupportTemporary();
+
+    @Resources.BaseMessage(
+            "CREATE SYSTEM FUNCTION is not supported, system functions can only be registered as temporary functions, you can use CREATE TEMPORARY SYSTEM FUNCTION instead.")
     Resources.ExInst<ParseException> createSystemFunctionOnlySupportTemporary();
 
     @Resources.BaseMessage("Duplicate EXPLAIN DETAIL is not allowed.")

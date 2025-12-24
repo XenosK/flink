@@ -18,15 +18,12 @@
 
 package org.apache.flink.runtime.scheduler.adaptive.allocator;
 
-import org.apache.flink.runtime.instance.SlotSharingGroupId;
+import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
 import org.apache.flink.runtime.jobmaster.SlotInfo;
-import org.apache.flink.runtime.scheduler.strategy.ExecutionVertexID;
+import org.apache.flink.runtime.jobmaster.slotpool.PhysicalSlot;
 
 import java.util.Collection;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -38,13 +35,13 @@ class AllocatorUtil {
 
     private AllocatorUtil() {}
 
-    static Map<SlotSharingGroupId, SlotSharingSlotAllocator.SlotSharingGroupMetaInfo>
+    static Map<SlotSharingGroup, SlotSharingSlotAllocator.SlotSharingGroupMetaInfo>
             getSlotSharingGroupMetaInfos(JobInformation jobInformation) {
         return SlotSharingSlotAllocator.SlotSharingGroupMetaInfo.from(jobInformation.getVertices());
     }
 
     static int getMinimumRequiredSlots(
-            Map<SlotSharingGroupId, SlotSharingSlotAllocator.SlotSharingGroupMetaInfo>
+            Map<SlotSharingGroup, SlotSharingSlotAllocator.SlotSharingGroupMetaInfo>
                     slotSharingGroupMetaInfos) {
         return slotSharingGroupMetaInfos.values().stream()
                 .map(SlotSharingSlotAllocator.SlotSharingGroupMetaInfo::getMaxLowerBound)
@@ -62,23 +59,12 @@ class AllocatorUtil {
                 minimumRequiredSlots);
     }
 
-    static List<SlotSharingSlotAllocator.ExecutionSlotSharingGroup>
-            createExecutionSlotSharingGroups(
-                    VertexParallelism vertexParallelism, SlotSharingGroup slotSharingGroup) {
-        final Map<Integer, Set<ExecutionVertexID>> sharedSlotToVertexAssignment = new HashMap<>();
-        slotSharingGroup
-                .getJobVertexIds()
-                .forEach(
-                        jobVertexId -> {
-                            int parallelism = vertexParallelism.getParallelism(jobVertexId);
-                            for (int subtaskIdx = 0; subtaskIdx < parallelism; subtaskIdx++) {
-                                sharedSlotToVertexAssignment
-                                        .computeIfAbsent(subtaskIdx, ignored -> new HashSet<>())
-                                        .add(new ExecutionVertexID(jobVertexId, subtaskIdx));
-                            }
-                        });
-        return sharedSlotToVertexAssignment.values().stream()
-                .map(SlotSharingSlotAllocator.ExecutionSlotSharingGroup::new)
-                .collect(Collectors.toList());
+    static Map<ResourceID, Set<PhysicalSlot>> getSlotsPerTaskExecutor(
+            Collection<PhysicalSlot> physicalSlots) {
+        return physicalSlots.stream()
+                .collect(
+                        Collectors.groupingBy(
+                                slot -> slot.getTaskManagerLocation().getResourceID(),
+                                Collectors.toSet()));
     }
 }

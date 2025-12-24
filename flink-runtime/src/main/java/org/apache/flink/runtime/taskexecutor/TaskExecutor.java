@@ -717,9 +717,11 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
             // deserialize the pre-serialized information
             final JobInformation jobInformation;
             final TaskInformation taskInformation;
+            final JobManagerTaskRestore taskRestore;
             try {
                 jobInformation = tdd.getJobInformation();
                 taskInformation = tdd.getTaskInformation();
+                taskRestore = tdd.getTaskRestore();
             } catch (IOException | ClassNotFoundException e) {
                 throw new TaskSubmissionException(
                         "Could not deserialize the job or task information.", e);
@@ -811,8 +813,6 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
             } catch (IOException e) {
                 throw new TaskSubmissionException(e);
             }
-
-            final JobManagerTaskRestore taskRestore = tdd.getTaskRestore();
 
             final TaskStateManager taskStateManager =
                     new TaskStateManagerImpl(
@@ -1568,7 +1568,8 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
                         memoryConfiguration,
                         taskManagerConfiguration.getDefaultSlotResourceProfile(),
                         taskManagerConfiguration.getTotalResourceProfile(),
-                        unresolvedTaskManagerLocation.getNodeId());
+                        unresolvedTaskManagerLocation.getNodeId(),
+                        taskManagerConfiguration.getNumberSlots());
 
         resourceManagerConnection =
                 new TaskExecutorToResourceManagerConnection(

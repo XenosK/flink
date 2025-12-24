@@ -18,6 +18,8 @@
 
 package org.apache.flink.table.test.program;
 
+import org.apache.flink.table.api.Model;
+import org.apache.flink.table.api.ModelDescriptor;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.TableResult;
@@ -75,6 +77,16 @@ public class TableApiTestStep implements TestStep {
                     public Table sqlQuery(String query) {
                         return env.sqlQuery(query);
                     }
+
+                    @Override
+                    public Model fromModel(String modelPath) {
+                        return env.fromModel(modelPath);
+                    }
+
+                    @Override
+                    public Model from(ModelDescriptor modelDescriptor) {
+                        return env.fromModel(modelDescriptor);
+                    }
                 });
     }
 
@@ -111,5 +123,11 @@ public class TableApiTestStep implements TestStep {
 
         /** See {@link TableEnvironment#sqlQuery(String)}. */
         Table sqlQuery(String query);
+
+        /** See {@link TableEnvironment#fromModel(String)}. */
+        Model fromModel(String modelPath);
+
+        /** See {@link TableEnvironment#fromModel(ModelDescriptor)}. */
+        Model from(ModelDescriptor modelDescriptor);
     }
 }

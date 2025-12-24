@@ -21,6 +21,8 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.DeploymentOptions;
 import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.StateRecoveryOptions;
+import org.apache.flink.configuration.TaskManagerOptions;
+import org.apache.flink.configuration.TraceOptions;
 import org.apache.flink.core.failure.FailureEnricher;
 import org.apache.flink.runtime.blob.BlobWriter;
 import org.apache.flink.runtime.blob.VoidBlobWriter;
@@ -106,7 +108,10 @@ public class AdaptiveSchedulerBuilder {
             checkpointStatsTrackerFactory =
                     (metricGroup, checkpointStatsListener) ->
                             new DefaultCheckpointStatsTracker(
-                                    10, metricGroup, checkpointStatsListener);
+                                    10,
+                                    metricGroup,
+                                    TraceOptions.CheckpointSpanDetailLevel.SPAN_PER_CHECKPOINT,
+                                    checkpointStatsListener);
 
     public AdaptiveSchedulerBuilder(
             final JobGraph jobGraph,
@@ -278,7 +283,9 @@ public class AdaptiveSchedulerBuilder {
                                 jobMasterConfiguration.get(DeploymentOptions.TARGET),
                                 jobMasterConfiguration.get(
                                         JobManagerOptions
-                                                .SCHEDULER_PREFER_MINIMAL_TASKMANAGERS_ENABLED))
+                                                .SCHEDULER_PREFER_MINIMAL_TASKMANAGERS_ENABLED),
+                                jobMasterConfiguration.get(
+                                        TaskManagerOptions.TASK_MANAGER_LOAD_BALANCE_MODE))
                         : slotAllocator,
                 executorService,
                 userCodeLoader,

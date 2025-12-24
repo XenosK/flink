@@ -103,6 +103,60 @@ Calc(select=[a], where=[>(random_udf(b), 10)])
 ]]>
     </Resource>
   </TestCase>
+  <TestCase name="testCastOfTestToSameType">
+    <Resource name="sql">
+      <![CDATA[SELECT `field2`, COALESCE(TRY_CAST(`field1`.`data`.`nested`.`trId` AS STRING)) AS transactionId FROM testCastOfTestToSameType]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(field2=[$1], transactionId=[COALESCE($0.data.nested.trId)])
++- LogicalProject(field1=[$0], field2=[$0])
+   +- LogicalTableScan(table=[[default_catalog, default_database, testCastOfTestToSameType]])
+]]>
+    </Resource>
+    <Resource name="optimized exec plan">
+      <![CDATA[
+Calc(select=[field1 AS field2, CAST(field1.data.nested.trId AS VARCHAR(2147483647)) AS transactionId])
++- TableSourceScan(table=[[default_catalog, default_database, testCastOfTestToSameType]], fields=[field1])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testCastOfTestToSameTypeWithArray">
+    <Resource name="sql">
+      <![CDATA[SELECT `field2`, COALESCE(TRY_CAST(`field1`.`data`[0].`nested`.`trId` AS STRING)) AS transactionId FROM testCastOfTestToSameTypeWithArray]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(field2=[$1], transactionId=[COALESCE(ITEM($0.data, 0).nested.trId)])
++- LogicalProject(field1=[$0], field2=[$0])
+   +- LogicalTableScan(table=[[default_catalog, default_database, testCastOfTestToSameTypeWithArray]])
+]]>
+    </Resource>
+    <Resource name="optimized exec plan">
+      <![CDATA[
+Calc(select=[field1 AS field2, CAST(ITEM(field1.data, 0).nested.trId AS VARCHAR(2147483647)) AS transactionId])
++- TableSourceScan(table=[[default_catalog, default_database, testCastOfTestToSameTypeWithArray]], fields=[field1])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testCastOfTestToSameTypeWithNullableNestedType">
+    <Resource name="sql">
+      <![CDATA[SELECT `field2`, COALESCE(TRY_CAST(`field1`.`data`.`nested`.`trId` AS STRING)) AS transactionId FROM testCastOfTestToSameTypeWithNullableNestedType]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(field2=[$1], transactionId=[COALESCE($0.data.nested.trId)])
++- LogicalProject(field1=[$0], field2=[$0])
+   +- LogicalTableScan(table=[[default_catalog, default_database, testCastOfTestToSameTypeWithNullableNestedType]])
+]]>
+    </Resource>
+    <Resource name="optimized exec plan">
+      <![CDATA[
+Calc(select=[field1 AS field2, COALESCE(field1.data.nested.trId) AS transactionId])
++- TableSourceScan(table=[[default_catalog, default_database, testCastOfTestToSameTypeWithNullableNestedType]], fields=[field1])
+]]>
+    </Resource>
+  </TestCase>
   <TestCase name="testConjunctiveFilter">
     <Resource name="sql">
       <![CDATA[SELECT * FROM MyTable WHERE a < 10 AND b > 20]]>
@@ -230,6 +284,66 @@ Calc(select=[a, b, CAST('xx' AS VARCHAR(2147483647)) AS c], where=[(SEARCH(b, Sa
 ]]>
     </Resource>
   </TestCase>
+  <TestCase name="testJoinAndAggregateOnNested">
+    <Resource name="sql">
+      <![CDATA[SELECT COUNT(t.data[0].nested[1].trId)
+FROM testJoinAndAggregateOnNested t, testJoinAndAggregateOnNested2 t2
+WHERE t.data[0].nested[0].trId = t2.data1.nested.trId
+GROUP BY t.data[1].nested[0].trId]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(EXPR$0=[$1])
++- LogicalAggregate(group=[{0}], EXPR$0=[COUNT($1)])
+   +- LogicalProject($f0=[CAST(ITEM(ITEM($0.data, 1).nested, 0).trId):VARCHAR(2147483647) CHARACTER SET "UTF-16LE"], $f1=[CAST(ITEM(ITEM($0.data, 0).nested, 1).trId):VARCHAR(2147483647) CHARACTER SET "UTF-16LE"])
+      +- LogicalFilter(condition=[=(CAST(ITEM(ITEM($0.data, 0).nested, 0).trId):VARCHAR(2147483647) CHARACTER SET "UTF-16LE", CAST($1.data1.nested.trId):VARCHAR(2147483647) CHARACTER SET "UTF-16LE")])
+         +- LogicalJoin(condition=[true], joinType=[inner])
+            :- LogicalTableScan(table=[[default_catalog, default_database, testJoinAndAggregateOnNested]])
+            +- LogicalTableScan(table=[[default_catalog, default_database, testJoinAndAggregateOnNested2]])
+]]>
+    </Resource>
+    <Resource name="optimized exec plan">
+      <![CDATA[
+Calc(select=[EXPR$0])
++- GroupAggregate(groupBy=[$f0], select=[$f0, COUNT($f1) AS EXPR$0])
+   +- Exchange(distribution=[hash[$f0]])
+      +- Calc(select=[CAST(ITEM(ITEM(field1.data, 1).nested, 0).trId AS VARCHAR(2147483647)) AS $f0, CAST(ITEM(ITEM(field1.data, 0).nested, 1).trId AS VARCHAR(2147483647)) AS $f1])
+         +- Join(joinType=[InnerJoin], where=[($f1 = $f10)], select=[field1, $f1, $f10], leftInputSpec=[NoUniqueKey], rightInputSpec=[NoUniqueKey])
+            :- Exchange(distribution=[hash[$f1]])
+            :  +- Calc(select=[field1, ITEM(ITEM(field1.data, 0).nested, 0).trId AS $f1])
+            :     +- TableSourceScan(table=[[default_catalog, default_database, testJoinAndAggregateOnNested]], fields=[field1])
+            +- Exchange(distribution=[hash[$f1]])
+               +- Calc(select=[field1.data1.nested.trId AS $f1])
+                  +- TableSourceScan(table=[[default_catalog, default_database, testJoinAndAggregateOnNested2]], fields=[field1])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testJoinOnNested">
+    <Resource name="sql">
+      <![CDATA[SELECT t.field1 as dt FROM testJoinOnNested t, testJoinOnNested2 t2 WHERE t.data[0].nested[0].trId = t2.data1.nested.trId]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(dt=[$0])
++- LogicalFilter(condition=[=(CAST(ITEM(ITEM($0.data, 0).nested, 0).trId):VARCHAR(2147483647) CHARACTER SET "UTF-16LE", CAST($1.data1.nested.trId):VARCHAR(2147483647) CHARACTER SET "UTF-16LE")])
+   +- LogicalJoin(condition=[true], joinType=[inner])
+      :- LogicalTableScan(table=[[default_catalog, default_database, testJoinOnNested]])
+      +- LogicalTableScan(table=[[default_catalog, default_database, testJoinOnNested2]])
+]]>
+    </Resource>
+    <Resource name="optimized exec plan">
+      <![CDATA[
+Calc(select=[field1 AS dt])
++- Join(joinType=[InnerJoin], where=[($f1 = $f10)], select=[field1, $f1, $f10], leftInputSpec=[NoUniqueKey], rightInputSpec=[NoUniqueKey])
+   :- Exchange(distribution=[hash[$f1]])
+   :  +- Calc(select=[field1, ITEM(ITEM(field1.data, 0).nested, 0).trId AS $f1])
+   :     +- TableSourceScan(table=[[default_catalog, default_database, testJoinOnNested]], fields=[field1])
+   +- Exchange(distribution=[hash[$f1]])
+      +- Calc(select=[field1.data1.nested.trId AS $f1])
+         +- TableSourceScan(table=[[default_catalog, default_database, testJoinOnNested2]], fields=[field1])
+]]>
+    </Resource>
+  </TestCase>
   <TestCase name="testMixedType">
     <Resource name="sql">
       <![CDATA[SELECT ROW(a, b, c), ARRAY[12, b], MAP[a, c] FROM MyTable5 WHERE (a, b, c) = ('foo', 12, TIMESTAMP '1984-07-12 14:34:24')]]>
@@ -268,23 +382,6 @@ Calc(select=[a, b, c], where=[((b > 0) AND (a < 50))])
 ]]>
     </Resource>
   </TestCase>
-  <TestCase name="testMultipleFlattening">
-    <Resource name="sql">
-      <![CDATA[SELECT MyTable2.a.*, c, MyTable2.b.* FROM MyTable2]]>
-    </Resource>
-    <Resource name="ast">
-      <![CDATA[
-LogicalProject(_1=[$0._1], _2=[$0._2], c=[$2], _10=[$1._1], _20=[$1._2])
-+- LogicalTableScan(table=[[default_catalog, default_database, MyTable2]])
-]]>
-    </Resource>
-    <Resource name="optimized exec plan">
-      <![CDATA[
-Calc(select=[a._1 AS _1, a._2 AS _2, c, b._1 AS _10, b._2 AS _20])
-+- TableSourceScan(table=[[default_catalog, default_database, MyTable2]], fields=[a, b, c])
-]]>
-    </Resource>
-  </TestCase>
   <TestCase name="testMultiProjects">
     <Resource name="sql">
       <![CDATA[SELECT c FROM (SELECT a, c FROM MyTable)]]>
@@ -303,6 +400,23 @@ Calc(select=[c])
 ]]>
     </Resource>
   </TestCase>
+  <TestCase name="testMultipleFlattening">
+    <Resource name="sql">
+      <![CDATA[SELECT MyTable2.a.*, c, MyTable2.b.* FROM MyTable2]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(_1=[$0._1], _2=[$0._2], c=[$2], _10=[$1._1], _20=[$1._2])
++- LogicalTableScan(table=[[default_catalog, default_database, MyTable2]])
+]]>
+    </Resource>
+    <Resource name="optimized exec plan">
+      <![CDATA[
+Calc(select=[a._1 AS _1, a._2 AS _2, c, b._1 AS _10, b._2 AS _20])
++- TableSourceScan(table=[[default_catalog, default_database, MyTable2]], fields=[a, b, c])
+]]>
+    </Resource>
+  </TestCase>
   <TestCase name="testNonPrimitiveMapType">
     <Resource name="sql">
       <![CDATA[SELECT MAP[a, c] FROM MyTable]]>
@@ -316,24 +430,6 @@ LogicalProject(EXPR$0=[MAP($0, $2)])
     <Resource name="optimized exec plan">
       <![CDATA[
 Calc(select=[MAP(a, c) AS EXPR$0])
-+- TableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
-]]>
-    </Resource>
-  </TestCase>
-  <TestCase name="testOrWithIsNullPredicate">
-    <Resource name="sql">
-      <![CDATA[SELECT * FROM MyTable WHERE a = 1 OR a = 10 OR a IS NULL]]>
-    </Resource>
-    <Resource name="ast">
-      <![CDATA[
-LogicalProject(a=[$0], b=[$1], c=[$2])
-+- LogicalFilter(condition=[OR(=($0, 1), =($0, 10), IS NULL($0))])
-   +- LogicalTableScan(table=[[default_catalog, default_database, MyTable]])
-]]>
-    </Resource>
-    <Resource name="optimized exec plan">
-      <![CDATA[
-Calc(select=[a, b, c], where=[SEARCH(a, Sarg[1, 10; NULL AS TRUE])])
 +- TableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
 ]]>
     </Resource>
@@ -391,24 +487,6 @@ Calc(select=[a, c])
 ]]>
     </Resource>
   </TestCase>
-  <TestCase name="testProjectAndFilter">
-    <Resource name="sql">
-      <![CDATA[SELECT a, b + 1 FROM MyTable WHERE b > 2]]>
-    </Resource>
-    <Resource name="ast">
-      <![CDATA[
-LogicalProject(a=[$0], EXPR$1=[+($1, 1)])
-+- LogicalFilter(condition=[>($1, 2)])
-   +- LogicalTableScan(table=[[default_catalog, default_database, MyTable]])
-]]>
-    </Resource>
-    <Resource name="optimized exec plan">
-      <![CDATA[
-Calc(select=[a, (b + 1) AS EXPR$1], where=[(b > 2)])
-+- TableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
-]]>
-    </Resource>
-  </TestCase>
   <TestCase name="testOrWithIsNullInIf">
     <Resource name="sql">
       <![CDATA[SELECT IF(c = '' OR c IS NULL, 'a', 'b') FROM MyTable]]>
@@ -422,6 +500,24 @@ LogicalProject(EXPR$0=[IF(SEARCH($2, Sarg[_UTF-16LE'':VARCHAR(2147483647) CHARAC
     <Resource name="optimized exec plan">
       <![CDATA[
 Calc(select=[IF(SEARCH(c, Sarg[_UTF-16LE''; NULL AS TRUE]), 'a', 'b') AS EXPR$0])
++- TableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testOrWithIsNullPredicate">
+    <Resource name="sql">
+      <![CDATA[SELECT * FROM MyTable WHERE a = 1 OR a = 10 OR a IS NULL]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(a=[$0], b=[$1], c=[$2])
++- LogicalFilter(condition=[OR(=($0, 1), =($0, 10), IS NULL($0))])
+   +- LogicalTableScan(table=[[default_catalog, default_database, MyTable]])
+]]>
+    </Resource>
+    <Resource name="optimized exec plan">
+      <![CDATA[
+Calc(select=[a, b, c], where=[SEARCH(a, Sarg[1, 10; NULL AS TRUE])])
 +- TableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
 ]]>
     </Resource>
@@ -455,6 +551,24 @@ LogicalProject(EXPR$0=[MAP($1, 30:BIGINT, 10, $0)])
     <Resource name="optimized exec plan">
       <![CDATA[
 Calc(select=[MAP(b, 30, 10, a) AS EXPR$0])
++- TableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testProjectAndFilter">
+    <Resource name="sql">
+      <![CDATA[SELECT a, b + 1 FROM MyTable WHERE b > 2]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(a=[$0], EXPR$1=[+($1, 1)])
++- LogicalFilter(condition=[>($1, 2)])
+   +- LogicalTableScan(table=[[default_catalog, default_database, MyTable]])
+]]>
+    </Resource>
+    <Resource name="optimized exec plan">
+      <![CDATA[
+Calc(select=[a, (b + 1) AS EXPR$1], where=[(b > 2)])
 +- TableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
 ]]>
     </Resource>
@@ -499,22 +613,71 @@ TableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a,
 ]]>
     </Resource>
   </TestCase>
-  <TestCase name="testRowTypeEquality">
+  <TestCase name="testRepeatedTryCast">
     <Resource name="sql">
-      <![CDATA[
-SELECT my_row = ROW(1, 'str') from src
-]]>
+      <![CDATA[SELECT TRY_CAST(TRY_CAST(a AS STRING) AS STRING) FROM MyTable]]>
     </Resource>
     <Resource name="ast">
       <![CDATA[
-LogicalProject(EXPR$0=[=(CAST($0):RecordType(INTEGER a, VARCHAR(2147483647) CHARACTER SET "UTF-16LE" b), CAST(ROW(1, _UTF-16LE'str')):RecordType(INTEGER a, VARCHAR(2147483647) CHARACTER SET "UTF-16LE" b) NOT NULL)])
-+- LogicalTableScan(table=[[default_catalog, default_database, src]])
+LogicalProject(EXPR$0=[TRY_CAST($0)])
++- LogicalTableScan(table=[[default_catalog, default_database, MyTable]])
 ]]>
     </Resource>
     <Resource name="optimized exec plan">
       <![CDATA[
-Calc(select=[(CAST(my_row AS RecordType(INTEGER a, VARCHAR(2147483647) b)) = CAST(ROW(1, 'str') AS RecordType(INTEGER a, VARCHAR(2147483647) b))) AS EXPR$0])
-+- TableSourceScan(table=[[default_catalog, default_database, src]], fields=[my_row])
+Calc(select=[TRY_CAST(a AS VARCHAR(2147483647)) AS EXPR$0])
++- TableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testRepeatedTryCastAfterCast">
+    <Resource name="sql">
+      <![CDATA[SELECT TRY_CAST(CAST(a AS STRING) AS STRING) FROM MyTable]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(EXPR$0=[CAST($0):VARCHAR(2147483647) CHARACTER SET "UTF-16LE"])
++- LogicalTableScan(table=[[default_catalog, default_database, MyTable]])
+]]>
+    </Resource>
+    <Resource name="optimized exec plan">
+      <![CDATA[
+Calc(select=[CAST(a AS VARCHAR(2147483647)) AS EXPR$0])
++- TableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testRepeatedTryCastDifferentType">
+    <Resource name="sql">
+      <![CDATA[SELECT TRY_CAST(TRY_CAST(a AS STRING) AS INTEGER) FROM MyTable]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(EXPR$0=[TRY_CAST(TRY_CAST($0))])
++- LogicalTableScan(table=[[default_catalog, default_database, MyTable]])
+]]>
+    </Resource>
+    <Resource name="optimized exec plan">
+      <![CDATA[
+Calc(select=[TRY_CAST(TRY_CAST(a AS VARCHAR(2147483647)) AS INTEGER) AS EXPR$0])
++- TableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testRepeatedTryCastSameType">
+    <Resource name="sql">
+      <![CDATA[SELECT TRY_CAST(a AS BIGINT) FROM MyTable]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(EXPR$0=[$0])
++- LogicalTableScan(table=[[default_catalog, default_database, MyTable]])
+]]>
+    </Resource>
+    <Resource name="optimized exec plan">
+      <![CDATA[
+Calc(select=[a AS EXPR$0])
++- TableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
 ]]>
     </Resource>
   </TestCase>
@@ -532,6 +695,25 @@ LogicalProject(EXPR$0=[ROW(1, _UTF-16LE'Hi', $0)])
       <![CDATA[
 Calc(select=[ROW(1, 'Hi', a) AS EXPR$0])
 +- TableSourceScan(table=[[default_catalog, default_database, MyTable]], fields=[a, b, c])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testRowTypeEquality">
+    <Resource name="sql">
+      <![CDATA[
+SELECT my_row = ROW(1, 'str') from src
+]]>
+    </Resource>
+    <Resource name="ast">
+      <![CDATA[
+LogicalProject(EXPR$0=[=($0, CAST(ROW(1, _UTF-16LE'str')):RecordType:peek_no_expand(INTEGER a, VARCHAR(2147483647) CHARACTER SET "UTF-16LE" b) NOT NULL)])
++- LogicalTableScan(table=[[default_catalog, default_database, src]])
+]]>
+    </Resource>
+    <Resource name="optimized exec plan">
+      <![CDATA[
+Calc(select=[(my_row = CAST(ROW(1, 'str') AS RecordType:peek_no_expand(INTEGER a, VARCHAR(2147483647) b))) AS EXPR$0])
++- TableSourceScan(table=[[default_catalog, default_database, src]], fields=[my_row])
 ]]>
     </Resource>
   </TestCase>

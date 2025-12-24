@@ -63,6 +63,7 @@ import org.apache.flink.runtime.scheduler.DefaultVertexParallelismInfo;
 import org.apache.flink.runtime.scheduler.ExecutionGraphHandler;
 import org.apache.flink.runtime.scheduler.OperatorCoordinatorHandler;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.VertexParallelism;
+import org.apache.flink.runtime.scheduler.adaptive.timeline.Durable;
 import org.apache.flink.runtime.scheduler.exceptionhistory.ExceptionHistoryEntry;
 import org.apache.flink.runtime.scheduler.exceptionhistory.RootExceptionHistoryEntry;
 import org.apache.flink.runtime.scheduler.exceptionhistory.TestingAccessExecution;
@@ -1041,6 +1042,11 @@ class ExecutingTest {
         public void cancel() {}
 
         @Override
+        public Durable getDurable() {
+            return null;
+        }
+
+        @Override
         public void suspend(Throwable cause) {}
 
         @Override
@@ -1074,9 +1080,16 @@ class ExecutingTest {
         MockExecutionJobVertex(
                 Function<ExecutionJobVertex, ExecutionVertex> executionVertexSupplier)
                 throws JobException {
+            this(executionVertexSupplier, new JobVertex("test"));
+        }
+
+        MockExecutionJobVertex(
+                final Function<ExecutionJobVertex, ExecutionVertex> executionVertexSupplier,
+                final JobVertex jobVertex)
+                throws JobException {
             super(
                     new MockInternalExecutionGraphAccessor(),
-                    new JobVertex("test"),
+                    jobVertex,
                     new DefaultVertexParallelismInfo(1, 1, max -> Optional.empty()),
                     new CoordinatorStoreImpl(),
                     UnregisteredMetricGroups.createUnregisteredJobManagerJobMetricGroup());

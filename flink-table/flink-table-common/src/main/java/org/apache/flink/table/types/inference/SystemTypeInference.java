@@ -97,16 +97,27 @@ public class SystemTypeInference {
         final TypeInference.Builder builder = TypeInference.newBuilder();
 
         final List<StaticArgument> systemArgs =
-                deriveSystemArgs(functionKind, origin.getStaticArguments().orElse(null));
+                deriveSystemArgs(
+                        functionKind,
+                        origin.getStaticArguments().orElse(null),
+                        origin.disableSystemArguments());
         if (systemArgs != null) {
             builder.staticArguments(systemArgs);
         }
         builder.inputTypeStrategy(
-                deriveSystemInputStrategy(functionKind, systemArgs, origin.getInputTypeStrategy()));
+                deriveSystemInputStrategy(
+                        functionKind,
+                        systemArgs,
+                        origin.getInputTypeStrategy(),
+                        origin.disableSystemArguments()));
         builder.stateTypeStrategies(origin.getStateTypeStrategies());
         builder.outputTypeStrategy(
                 deriveSystemOutputStrategy(
-                        functionKind, systemArgs, origin.getOutputTypeStrategy()));
+                        functionKind,
+                        systemArgs,
+                        origin.getOutputTypeStrategy(),
+                        origin.disableSystemArguments()));
+        builder.disableSystemArguments(origin.disableSystemArguments());
         return builder.build();
     }
 
@@ -130,7 +141,9 @@ public class SystemTypeInference {
     }
 
     private static @Nullable List<StaticArgument> deriveSystemArgs(
-            FunctionKind functionKind, @Nullable List<StaticArgument> declaredArgs) {
+            FunctionKind functionKind,
+            @Nullable List<StaticArgument> declaredArgs,
+            boolean disableSystemArgs) {
         if (functionKind != FunctionKind.PROCESS_TABLE) {
             if (declaredArgs != null) {
                 checkScalarArgsOnly(declaredArgs);
@@ -147,7 +160,9 @@ public class SystemTypeInference {
         checkPassThroughColumns(declaredArgs);
 
         final List<StaticArgument> newStaticArgs = new ArrayList<>(declaredArgs);
-        newStaticArgs.addAll(PROCESS_TABLE_FUNCTION_SYSTEM_ARGS);
+        if (!disableSystemArgs) {
+            newStaticArgs.addAll(PROCESS_TABLE_FUNCTION_SYSTEM_ARGS);
+        }
         return newStaticArgs;
     }
 
@@ -167,10 +182,14 @@ public class SystemTypeInference {
     }
 
     private static void checkMultipleTableArgs(List<StaticArgument> staticArgs) {
-        if (staticArgs.stream().filter(arg -> arg.is(StaticArgumentTrait.TABLE)).count() <= 1) {
+        final List<StaticArgument> tableArgs =
+                staticArgs.stream()
+                        .filter(arg -> arg.is(StaticArgumentTrait.TABLE))
+                        .collect(Collectors.toList());
+        if (tableArgs.size() <= 1) {
             return;
         }
-        if (staticArgs.stream().anyMatch(arg -> !arg.is(StaticArgumentTrait.TABLE_AS_SET))) {
+        if (tableArgs.stream().anyMatch(arg -> !arg.is(StaticArgumentTrait.SET_SEMANTIC_TABLE))) {
             throw new ValidationException(
                     "All table arguments must use set semantics if multiple table arguments are declared.");
         }
@@ -197,21 +216,26 @@ public class SystemTypeInference {
     private static InputTypeStrategy deriveSystemInputStrategy(
             FunctionKind functionKind,
             @Nullable List<StaticArgument> staticArgs,
-            InputTypeStrategy inputStrategy) {
+            InputTypeStrategy inputStrategy,
+            boolean disableSystemArgs) {
         if (functionKind != FunctionKind.PROCESS_TABLE) {
             return inputStrategy;
         }
-        return new SystemInputStrategy(staticArgs, inputStrategy);
+        return new SystemInputStrategy(staticArgs, inputStrategy, disableSystemArgs);
     }
 
     private static TypeStrategy deriveSystemOutputStrategy(
             FunctionKind functionKind,
             @Nullable List<StaticArgument> staticArgs,
-            TypeStrategy outputStrategy) {
-        if (functionKind != FunctionKind.TABLE && functionKind != FunctionKind.PROCESS_TABLE) {
+            TypeStrategy outputStrategy,
+            boolean disableSystemArgs) {
+        if (functionKind != FunctionKind.TABLE
+                && functionKind != FunctionKind.PROCESS_TABLE
+                && functionKind != FunctionKind.ASYNC_TABLE) {
             return outputStrategy;
         }
-        return new SystemOutputStrategy(functionKind, staticArgs, outputStrategy);
+        return new SystemOutputStrategy(
+                functionKind, staticArgs, outputStrategy, disableSystemArgs);
     }
 
     private static class SystemOutputStrategy implements TypeStrategy {
@@ -219,12 +243,17 @@ public class SystemTypeInference {
         private final FunctionKind functionKind;
         private final List<StaticArgument> staticArgs;
         private final TypeStrategy origin;
+        private final boolean disableSystemArgs;
 
         private SystemOutputStrategy(
-                FunctionKind functionKind, List<StaticArgument> staticArgs, TypeStrategy origin) {
+                FunctionKind functionKind,
+                List<StaticArgument> staticArgs,
+                TypeStrategy origin,
+                boolean disableSystemArgs) {
             this.functionKind = functionKind;
             this.staticArgs = staticArgs;
             this.origin = origin;
+            this.disableSystemArgs = disableSystemArgs;
         }
 
         @Override
@@ -245,7 +274,10 @@ public class SystemTypeInference {
                                 // this whole topic is kind of vendor specific already
                                 fields.addAll(derivePassThroughFields(callContext));
                                 fields.addAll(deriveFunctionOutputFields(functionDataType));
-                                fields.addAll(deriveRowtimeField(callContext));
+
+                                if (!disableSystemArgs) {
+                                    fields.addAll(deriveRowtimeField(callContext));
+                                }
 
                                 final List<Field> uniqueFields = makeFieldNamesUnique(fields);
 
@@ -282,7 +314,7 @@ public class SystemTypeInference {
                                 if (arg.is(StaticArgumentTrait.PASS_COLUMNS_THROUGH)) {
                                     return DataType.getFields(argDataTypes.get(pos)).stream();
                                 }
-                                if (!arg.is(StaticArgumentTrait.TABLE_AS_SET)) {
+                                if (!arg.is(StaticArgumentTrait.SET_SEMANTIC_TABLE)) {
                                     return Stream.<Field>empty();
                                 }
                                 final TableSemantics semantics =
@@ -478,10 +510,15 @@ public class SystemTypeInference {
 
         private final List<StaticArgument> staticArgs;
         private final InputTypeStrategy origin;
+        private final boolean disableSystemArgs;
 
-        private SystemInputStrategy(List<StaticArgument> staticArgs, InputTypeStrategy origin) {
+        private SystemInputStrategy(
+                List<StaticArgument> staticArgs,
+                InputTypeStrategy origin,
+                boolean disableSystemArgs) {
             this.staticArgs = staticArgs;
             this.origin = origin;
+            this.disableSystemArgs = disableSystemArgs;
         }
 
         @Override
@@ -512,7 +549,9 @@ public class SystemTypeInference {
 
             try {
                 checkTableArgs(staticArgs, callContext);
-                checkUidArg(callContext);
+                if (!disableSystemArgs) {
+                    checkUidArg(callContext);
+                }
             } catch (ValidationException e) {
                 return callContext.fail(throwOnFailure, e.getMessage());
             }
@@ -607,7 +646,7 @@ public class SystemTypeInference {
         }
 
         private static void checkRowSemantics(StaticArgument staticArg, TableSemantics semantics) {
-            if (!staticArg.is(StaticArgumentTrait.TABLE_AS_ROW)) {
+            if (!staticArg.is(StaticArgumentTrait.ROW_SEMANTIC_TABLE)) {
                 return;
             }
             if (semantics.partitionByColumns().length > 0
@@ -618,7 +657,7 @@ public class SystemTypeInference {
         }
 
         private static void checkSetSemantics(StaticArgument staticArg, TableSemantics semantics) {
-            if (!staticArg.is(StaticArgumentTrait.TABLE_AS_SET)) {
+            if (!staticArg.is(StaticArgumentTrait.SET_SEMANTIC_TABLE)) {
                 return;
             }
             if (semantics.partitionByColumns().length == 0

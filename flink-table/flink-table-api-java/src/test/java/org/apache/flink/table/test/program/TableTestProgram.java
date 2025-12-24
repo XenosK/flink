@@ -21,6 +21,7 @@ package org.apache.flink.table.test.program;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableRuntimeException;
+import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.functions.UserDefinedFunction;
 import org.apache.flink.table.test.program.FunctionTestStep.FunctionBehavior;
@@ -111,6 +112,21 @@ public class TableTestProgram {
     @Override
     public String toString() {
         return id;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+
+        TableTestProgram that = (TableTestProgram) o;
+        return id.equals(that.id);
+    }
+
+    @Override
+    public int hashCode() {
+        return id.hashCode();
     }
 
     /**
@@ -318,12 +334,32 @@ public class TableTestProgram {
         }
 
         /**
+         * Setup steps for each table source.
+         *
+         * <p>Use {@link SourceTestStep.Builder} to construct this step.
+         */
+        public Builder setupTableSources(List<SourceTestStep> sourceTestSteps) {
+            setupSteps.addAll(sourceTestSteps);
+            return this;
+        }
+
+        /**
          * Setup step for a table sink.
          *
          * <p>Use {@link SinkTestStep.Builder} to construct this step.
          */
         public Builder setupTableSink(SinkTestStep sinkTestStep) {
             setupSteps.add(sinkTestStep);
+            return this;
+        }
+
+        /**
+         * Setup steps for each table sink.
+         *
+         * <p>Use {@link SinkTestStep.Builder} to construct this step.
+         */
+        public Builder setupTableSinks(List<SinkTestStep> sinkTestSteps) {
+            setupSteps.addAll(sinkTestSteps);
             return this;
         }
 
@@ -352,6 +388,22 @@ public class TableTestProgram {
                 Class<? extends Exception> expectedException,
                 String expectedErrorMessage) {
             this.runSteps.add(new FailingSqlTestStep(sql, expectedException, expectedErrorMessage));
+            return this;
+        }
+
+        /**
+         * Run step for executing a Table API query that will fail eventually with either {@link
+         * ValidationException} (during planning time) or {@link TableRuntimeException} (during
+         * execution time).
+         */
+        public Builder runFailingTableApi(
+                Function<TableEnvAccessor, Table> toTable,
+                String sinkName,
+                Class<? extends Exception> expectedException,
+                String expectedErrorMessage) {
+            this.runSteps.add(
+                    new FailingTableApiTestStep(
+                            toTable, sinkName, expectedException, expectedErrorMessage));
             return this;
         }
 

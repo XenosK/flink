@@ -21,6 +21,9 @@ package org.apache.flink.table.catalog;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Schema;
+import org.apache.flink.table.catalog.CatalogMaterializedTable.LogicalRefreshMode;
+import org.apache.flink.table.catalog.CatalogMaterializedTable.RefreshMode;
+import org.apache.flink.table.catalog.CatalogMaterializedTable.RefreshStatus;
 import org.apache.flink.table.catalog.exceptions.TableNotExistException;
 import org.apache.flink.table.expressions.DefaultSqlFactory;
 import org.apache.flink.table.expressions.ResolvedExpression;
@@ -155,7 +158,8 @@ class CatalogBaseTableResolutionTest {
             new ContinuousRefreshHandler(
                     "remote", "StandaloneClusterId", JobID.generate().toHexString());
 
-    private static final String DEFINITION_QUERY =
+    private static final String DEFAULT_ORIGINAL_QUERY = "SELECT id, region, county FROM T";
+    private static final String DEFAULT_EXPANDED_QUERY =
             String.format(
                     "SELECT id, region, county FROM %s.%s.T", DEFAULT_CATALOG, DEFAULT_DATABASE);
 
@@ -195,10 +199,12 @@ class CatalogBaseTableResolutionTest {
         assertThat(resolvedMaterializedTable.getResolvedSchema())
                 .isEqualTo(RESOLVED_MATERIALIZED_TABLE_SCHEMA);
 
-        assertThat(resolvedMaterializedTable.getDefinitionQuery())
-                .isEqualTo(materializedTable.getDefinitionQuery());
-        assertThat(resolvedMaterializedTable.getFreshness())
-                .isEqualTo(materializedTable.getFreshness());
+        assertThat(resolvedMaterializedTable.getOriginalQuery())
+                .isEqualTo(materializedTable.getOriginalQuery());
+        assertThat(resolvedMaterializedTable.getExpandedQuery())
+                .isEqualTo(materializedTable.getExpandedQuery());
+        assertThat(resolvedMaterializedTable.getDefinitionFreshness())
+                .isEqualTo(materializedTable.getDefinitionFreshness());
         assertThat(resolvedMaterializedTable.getLogicalRefreshMode())
                 .isEqualTo(materializedTable.getLogicalRefreshMode());
         assertThat(resolvedMaterializedTable.getRefreshMode())
@@ -245,14 +251,16 @@ class CatalogBaseTableResolutionTest {
                 .isEqualTo(RESOLVED_MATERIALIZED_TABLE_SCHEMA);
         assertThat(resolvedCatalogMaterializedTable.getDefinitionFreshness())
                 .isEqualTo(IntervalFreshness.ofSecond("30"));
-        assertThat(resolvedCatalogMaterializedTable.getDefinitionQuery())
-                .isEqualTo(DEFINITION_QUERY);
+        assertThat(resolvedCatalogMaterializedTable.getOriginalQuery())
+                .isEqualTo(DEFAULT_ORIGINAL_QUERY);
+        assertThat(resolvedCatalogMaterializedTable.getExpandedQuery())
+                .isEqualTo(DEFAULT_EXPANDED_QUERY);
         assertThat(resolvedCatalogMaterializedTable.getLogicalRefreshMode())
-                .isEqualTo(CatalogMaterializedTable.LogicalRefreshMode.CONTINUOUS);
+                .isSameAs(LogicalRefreshMode.CONTINUOUS);
         assertThat(resolvedCatalogMaterializedTable.getRefreshMode())
-                .isEqualTo(CatalogMaterializedTable.RefreshMode.CONTINUOUS);
+                .isSameAs(RefreshMode.CONTINUOUS);
         assertThat(resolvedCatalogMaterializedTable.getRefreshStatus())
-                .isEqualTo(CatalogMaterializedTable.RefreshStatus.INITIALIZING);
+                .isSameAs(RefreshStatus.INITIALIZING);
         byte[] expectedBytes =
                 ContinuousRefreshHandlerSerializer.INSTANCE.serialize(CONTINUOUS_REFRESH_HANDLER);
         assertThat(resolvedCatalogMaterializedTable.getSerializedRefreshHandler())
@@ -421,7 +429,8 @@ class CatalogBaseTableResolutionTest {
         properties.put("logical-refresh-mode", "CONTINUOUS");
         properties.put("refresh-mode", "CONTINUOUS");
         properties.put("refresh-status", "INITIALIZING");
-        properties.put("definition-query", DEFINITION_QUERY);
+        properties.put("original-query", DEFAULT_ORIGINAL_QUERY);
+        properties.put("expanded-query", DEFAULT_EXPANDED_QUERY);
 
         // put refresh handler
         properties.put(
@@ -436,21 +445,17 @@ class CatalogBaseTableResolutionTest {
         final String comment = "This is an example materialized table.";
         final List<String> partitionKeys = Arrays.asList("region", "county");
 
-        final String definitionQuery =
-                String.format(
-                        "SELECT id, region, county FROM %s.%s.T",
-                        DEFAULT_CATALOG, DEFAULT_DATABASE);
-
         CatalogMaterializedTable.Builder builder = CatalogMaterializedTable.newBuilder();
         return builder.schema(MATERIALIZED_TABLE_SCHEMA)
                 .comment(comment)
                 .partitionKeys(partitionKeys)
                 .options(Collections.emptyMap())
-                .definitionQuery(definitionQuery)
+                .originalQuery(DEFAULT_ORIGINAL_QUERY)
+                .expandedQuery(DEFAULT_EXPANDED_QUERY)
                 .freshness(IntervalFreshness.ofSecond("30"))
-                .logicalRefreshMode(CatalogMaterializedTable.LogicalRefreshMode.AUTOMATIC)
-                .refreshMode(CatalogMaterializedTable.RefreshMode.CONTINUOUS)
-                .refreshStatus(CatalogMaterializedTable.RefreshStatus.INITIALIZING)
+                .logicalRefreshMode(LogicalRefreshMode.AUTOMATIC)
+                .refreshMode(RefreshMode.CONTINUOUS)
+                .refreshStatus(RefreshStatus.INITIALIZING)
                 .build();
     }
 

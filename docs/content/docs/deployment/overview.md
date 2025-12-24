@@ -285,7 +285,17 @@ Supported Environment:
 {{< label AWS >}}
 {{< label Azure >}}
 {{< label Google Cloud >}}
-{{< label On-Premise >}}
+{{< label On-Premises >}}
+
+#### Confluent Cloud and Platform
+
+[Website](https://www.confluent.io/)
+
+Supported Environments:
+{{< label AWS >}}
+{{< label Azure >}}
+{{< label Google Cloud >}}
+{{< label On-Premises >}}
 
 #### Huawei Cloud Stream Service
 
@@ -294,15 +304,15 @@ Supported Environment:
 Supported Environment:
 {{< label Huawei Cloud >}}
 
-#### Ververica Platform
+#### Ververica's Unified Streaming Data Platform (Managed Service / BYOC / Self-Managed)
 
-[Website](https://www.ververica.com/platform)
+[Website](https://www.ververica.com/product)
 
 Supported Environments:
 {{< label AliCloud >}}
 {{< label AWS >}}
 {{< label Azure >}}
 {{< label Google Cloud >}}
-{{< label On-Premise >}}
+{{< label On-Premises >}}
 
 {{< top >}}

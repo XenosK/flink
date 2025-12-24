@@ -32,6 +32,9 @@ import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.ExplainDetail;
 import org.apache.flink.table.api.ExplainFormat;
 import org.apache.flink.table.api.Expressions;
+import org.apache.flink.table.api.FunctionDescriptor;
+import org.apache.flink.table.api.Model;
+import org.apache.flink.table.api.ModelDescriptor;
 import org.apache.flink.table.api.PlanReference;
 import org.apache.flink.table.api.ResultKind;
 import org.apache.flink.table.api.SqlParserException;
@@ -53,12 +56,14 @@ import org.apache.flink.table.catalog.CatalogManager;
 import org.apache.flink.table.catalog.CatalogStore;
 import org.apache.flink.table.catalog.CatalogStoreHolder;
 import org.apache.flink.table.catalog.Column;
+import org.apache.flink.table.catalog.ContextResolvedModel;
 import org.apache.flink.table.catalog.ContextResolvedTable;
 import org.apache.flink.table.catalog.FunctionCatalog;
 import org.apache.flink.table.catalog.FunctionLanguage;
 import org.apache.flink.table.catalog.GenericInMemoryCatalog;
 import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.QueryOperationCatalogView;
+import org.apache.flink.table.catalog.ResolvedCatalogModel;
 import org.apache.flink.table.catalog.ResolvedCatalogTable;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.catalog.StagedTable;
@@ -75,6 +80,7 @@ import org.apache.flink.table.execution.StagingSinkJobStatusHook;
 import org.apache.flink.table.expressions.ApiExpressionUtils;
 import org.apache.flink.table.expressions.DefaultSqlFactory;
 import org.apache.flink.table.expressions.Expression;
+import org.apache.flink.table.expressions.ModelReferenceExpression;
 import org.apache.flink.table.expressions.TableReferenceExpression;
 import org.apache.flink.table.expressions.utils.ApiExpressionDefaultVisitor;
 import org.apache.flink.table.factories.CatalogStoreFactory;
@@ -416,7 +422,14 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
     @Override
     public void createTemporarySystemFunction(
             String name, String className, List<ResourceUri> resourceUris) {
-        functionCatalog.registerTemporarySystemFunction(name, className, resourceUris);
+        createTemporarySystemFunction(
+                name,
+                FunctionDescriptor.forClassName(className).resourceUris(resourceUris).build());
+    }
+
+    @Override
+    public void createTemporarySystemFunction(String name, FunctionDescriptor functionDescriptor) {
+        functionCatalog.registerTemporarySystemFunction(name, functionDescriptor, false);
     }
 
     @Override
@@ -434,9 +447,8 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
             String path,
             Class<? extends UserDefinedFunction> functionClass,
             boolean ignoreIfExists) {
-        final UnresolvedIdentifier unresolvedIdentifier = getParser().parseIdentifier(path);
-        functionCatalog.registerCatalogFunction(
-                unresolvedIdentifier, functionClass, ignoreIfExists);
+        createFunction(
+                path, FunctionDescriptor.forFunctionClass(functionClass).build(), ignoreIfExists);
     }
 
     @Override
@@ -447,9 +459,27 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
     @Override
     public void createFunction(
             String path, String className, List<ResourceUri> resourceUris, boolean ignoreIfExists) {
+        createFunction(
+                path,
+                FunctionDescriptor.forClassName(className)
+                        .language(FunctionLanguage.JAVA)
+                        .resourceUris(resourceUris)
+                        .build(),
+                ignoreIfExists);
+    }
+
+    @Override
+    public void createFunction(String path, FunctionDescriptor functionDescriptor) {
+        createFunction(path, functionDescriptor, false);
+    }
+
+    @Override
+    public void createFunction(
+            String path, FunctionDescriptor functionDescriptor, boolean ignoreIfExists) {
+
         final UnresolvedIdentifier unresolvedIdentifier = getParser().parseIdentifier(path);
         functionCatalog.registerCatalogFunction(
-                unresolvedIdentifier, className, resourceUris, ignoreIfExists);
+                unresolvedIdentifier, functionDescriptor, ignoreIfExists);
     }
 
     @Override
@@ -476,9 +506,23 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
     @Override
     public void createTemporaryFunction(
             String path, String className, List<ResourceUri> resourceUris) {
+        createTemporaryFunction(
+                path,
+                FunctionDescriptor.forClassName(className)
+                        .language(FunctionLanguage.JAVA)
+                        .resourceUris(resourceUris)
+                        .build());
+    }
+
+    @Override
+    public void createTemporaryFunction(String path, FunctionDescriptor functionDescriptor) {
         final UnresolvedIdentifier unresolvedIdentifier = getParser().parseIdentifier(path);
         final CatalogFunction catalogFunction =
-                new CatalogFunctionImpl(className, FunctionLanguage.JAVA, resourceUris);
+                new CatalogFunctionImpl(
+                        functionDescriptor.getClassName(),
+                        functionDescriptor.getLanguage(),
+                        functionDescriptor.getResourceUris(),
+                        functionDescriptor.getOptions());
         functionCatalog.registerTemporaryCatalogFunction(
                 unresolvedIdentifier, catalogFunction, false);
     }
@@ -500,8 +544,7 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
         Preconditions.checkNotNull(path, "Path must not be null.");
         Preconditions.checkNotNull(descriptor, "Table descriptor must not be null.");
 
-        final ObjectIdentifier tableIdentifier =
-                catalogManager.qualifyIdentifier(getParser().parseIdentifier(path));
+        final ObjectIdentifier tableIdentifier = getObjectIdentifierFromPath(path);
         catalogManager.createTemporaryTable(
                 descriptor.toCatalogTable(), tableIdentifier, ignoreIfExists);
     }
@@ -516,8 +559,7 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
         Preconditions.checkNotNull(path, "Path must not be null.");
         Preconditions.checkNotNull(descriptor, "Table descriptor must not be null.");
 
-        final ObjectIdentifier tableIdentifier =
-                catalogManager.qualifyIdentifier(getParser().parseIdentifier(path));
+        final ObjectIdentifier tableIdentifier = getObjectIdentifierFromPath(path);
         return catalogManager.createTable(
                 descriptor.toCatalogTable(), tableIdentifier, ignoreIfExists);
     }
@@ -569,6 +611,34 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
     }
 
     @Override
+    public void createModel(String path, ModelDescriptor descriptor, boolean ignoreIfExists) {
+        Preconditions.checkNotNull(path, "Path must not be null.");
+        Preconditions.checkNotNull(descriptor, "Model descriptor must not be null.");
+        final ObjectIdentifier objectIdentifier = getObjectIdentifierFromPath(path);
+        catalogManager.createModel(descriptor.toCatalogModel(), objectIdentifier, ignoreIfExists);
+    }
+
+    @Override
+    public void createModel(String path, ModelDescriptor descriptor) {
+        createModel(path, descriptor, false);
+    }
+
+    @Override
+    public void createTemporaryModel(String path, ModelDescriptor descriptor) {
+        createTemporaryModel(path, descriptor, false);
+    }
+
+    @Override
+    public void createTemporaryModel(
+            String path, ModelDescriptor descriptor, boolean ignoreIfExists) {
+        Preconditions.checkNotNull(path, "Path must not be null.");
+        Preconditions.checkNotNull(descriptor, "Model descriptor must not be null.");
+        final ObjectIdentifier objectIdentifier = getObjectIdentifierFromPath(path);
+        catalogManager.createTemporaryModel(
+                descriptor.toCatalogModel(), objectIdentifier, ignoreIfExists);
+    }
+
+    @Override
     public Table scan(String... tablePath) {
         UnresolvedIdentifier unresolvedIdentifier = UnresolvedIdentifier.of(tablePath);
         return scanInternal(unresolvedIdentifier)
@@ -614,6 +684,29 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
         tableReferenceChecker.check(arguments);
         return createTable(
                 operationTreeBuilder.tableFunction(Expressions.call(function, arguments)));
+    }
+
+    @Override
+    public Model fromModel(String modelPath) {
+        UnresolvedIdentifier unresolvedIdentifier = getParser().parseIdentifier(modelPath);
+        ObjectIdentifier modelIdentifier = catalogManager.qualifyIdentifier(unresolvedIdentifier);
+        return catalogManager
+                .getModel(modelIdentifier)
+                .map(this::createModel)
+                .orElseThrow(
+                        () ->
+                                new ValidationException(
+                                        String.format(
+                                                "Model %s was not found.", unresolvedIdentifier)));
+    }
+
+    @Override
+    public Model fromModel(ModelDescriptor descriptor) {
+        Preconditions.checkNotNull(descriptor, "Model descriptor must not be null.");
+
+        final ResolvedCatalogModel resolvedCatalogModel =
+                catalogManager.resolveCatalogModel(descriptor.toCatalogModel());
+        return createModel(ContextResolvedModel.anonymous(resolvedCatalogModel));
     }
 
     private Optional<SourceQueryOperation> scanInternal(UnresolvedIdentifier identifier) {
@@ -663,6 +756,11 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
     @Override
     public String[] listViews() {
         return catalogManager.listViews().stream().sorted().toArray(String[]::new);
+    }
+
+    @Override
+    public String[] listMaterializedTables() {
+        return catalogManager.listMaterializedTables().stream().sorted().toArray(String[]::new);
     }
 
     @Override
@@ -724,6 +822,30 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
     }
 
     @Override
+    public boolean dropModel(String path) {
+        return dropModel(path, true);
+    }
+
+    @Override
+    public boolean dropModel(String path, boolean ignoreIfNotExists) {
+        Preconditions.checkNotNull(path, "Path must not be null.");
+        ObjectIdentifier objectIdentifier = getObjectIdentifierFromPath(path);
+        return catalogManager.dropModel(objectIdentifier, ignoreIfNotExists);
+    }
+
+    @Override
+    public boolean dropTemporaryModel(String path) {
+        Preconditions.checkNotNull(path, "Path must not be null.");
+        ObjectIdentifier objectIdentifier = getObjectIdentifierFromPath(path);
+        try {
+            catalogManager.dropTemporaryModel(objectIdentifier, false);
+            return true;
+        } catch (ValidationException e) {
+            return false;
+        }
+    }
+
+    @Override
     public String[] listUserDefinedFunctions() {
         String[] functions = functionCatalog.getUserDefinedFunctions();
         Arrays.sort(functions);
@@ -735,6 +857,16 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
         String[] functions = functionCatalog.getFunctions();
         Arrays.sort(functions);
         return functions;
+    }
+
+    @Override
+    public String[] listModels() {
+        return catalogManager.listModels().stream().sorted().toArray(String[]::new);
+    }
+
+    @Override
+    public String[] listTemporaryModels() {
+        return catalogManager.listTemporaryModels().stream().sorted().toArray(String[]::new);
     }
 
     @Override
@@ -1382,6 +1514,10 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
                 functionCatalog.asLookup(getParser()::parseIdentifier));
     }
 
+    public ModelImpl createModel(ContextResolvedModel model) {
+        return ModelImpl.createModel(this, model);
+    }
+
     @Override
     public String explainPlan(InternalPlan compiledPlan, ExplainDetail... extraDetails) {
         return planner.explainPlan(compiledPlan, extraDetails);
@@ -1393,6 +1529,10 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
             return sinkModifyOperation.isDelete() || sinkModifyOperation.isUpdate();
         }
         return false;
+    }
+
+    private ObjectIdentifier getObjectIdentifierFromPath(String path) {
+        return catalogManager.qualifyIdentifier(getParser().parseIdentifier(path));
     }
 
     /** A utility for {@link #fromCall} to check that all references belong to this environment. */
@@ -1419,6 +1559,17 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
                     && tableRef.getTableEnvironment() != TableEnvironmentImpl.this) {
                 throw new ValidationException(
                         "All table references must use the same TableEnvironment.");
+            }
+            return null;
+        }
+
+        @Override
+        public Void visit(ModelReferenceExpression modelRef) {
+            super.visit(modelRef);
+            if (modelRef.getTableEnvironment() != null
+                    && modelRef.getTableEnvironment() != TableEnvironmentImpl.this) {
+                throw new ValidationException(
+                        "All model references must use the same TableEnvironment.");
             }
             return null;
         }

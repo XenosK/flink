@@ -22,7 +22,7 @@ import org.apache.flink.table.api.config.OptimizerConfigOptions
 import org.apache.flink.table.planner.plan.nodes.FlinkConventions
 import org.apache.flink.table.planner.plan.rules.FlinkStreamRuleSets
 import org.apache.flink.table.planner.plan.rules.logical.EventTimeTemporalJoinRewriteRule
-import org.apache.flink.table.planner.plan.rules.physical.stream.FlinkDuplicateChangesTraitInitProgram
+import org.apache.flink.table.planner.plan.rules.physical.stream.{FlinkDuplicateChangesTraitInitProgram, FlinkMarkChangelogNormalizeProgram}
 
 import org.apache.calcite.plan.hep.HepMatchOrder
 
@@ -35,6 +35,7 @@ object FlinkStreamProgram {
   val DEFAULT_REWRITE = "default_rewrite"
   val PREDICATE_PUSHDOWN = "predicate_pushdown"
   val JOIN_REORDER = "join_reorder"
+  val MULTI_JOIN = "multi_join"
   val PROJECT_REWRITE = "project_rewrite"
   val LOGICAL = "logical"
   val LOGICAL_REWRITE = "logical_rewrite"
@@ -231,6 +232,22 @@ object FlinkStreamProgram {
       )
     }
 
+    // multi-join
+    chainedProgram.addLast(
+      MULTI_JOIN,
+      FlinkGroupProgramBuilder
+        .newBuilder[StreamOptimizeContext]
+        .addProgram(
+          FlinkHepRuleSetProgramBuilder.newBuilder
+            .setHepRulesExecutionType(HEP_RULES_EXECUTION_TYPE.RULE_COLLECTION)
+            .setHepMatchOrder(HepMatchOrder.BOTTOM_UP)
+            .add(FlinkStreamRuleSets.MULTI_JOIN_RULES)
+            .build(),
+          "merge binary regular joins into MultiJoin"
+        )
+        .build()
+    )
+
     // project rewrite
     chainedProgram.addLast(
       PROJECT_REWRITE,
@@ -287,6 +304,9 @@ object FlinkStreamProgram {
       PHYSICAL_REWRITE,
       FlinkGroupProgramBuilder
         .newBuilder[StreamOptimizeContext]
+        .addProgram(
+          new FlinkMarkChangelogNormalizeProgram,
+          "mark changelog normalize reusing same source")
         // add a HEP program for watermark transpose rules to make this optimization deterministic
         // Applying these rules before the changelog mode inference is important because
         // 1. if we transpose calc and projection before we infer the changelog mode, we

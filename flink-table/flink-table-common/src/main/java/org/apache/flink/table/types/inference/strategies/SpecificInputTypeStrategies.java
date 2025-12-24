@@ -63,6 +63,12 @@ public final class SpecificInputTypeStrategies {
     /** See {@link OverTypeStrategy}. */
     public static final InputTypeStrategy OVER = new OverTypeStrategy();
 
+    /** See {@link ObjectOfInputTypeStrategy}. */
+    public static final InputTypeStrategy OBJECT_OF = new ObjectOfInputTypeStrategy();
+
+    /** See {@link ObjectUpdateInputTypeStrategy}. */
+    public static final InputTypeStrategy OBJECT_UPDATE = new ObjectUpdateInputTypeStrategy();
+
     /** See {@link WindowTimeIndictorInputTypeStrategy}. */
     public static InputTypeStrategy windowTimeIndicator(TimestampKind timestampKind) {
         return new WindowTimeIndictorInputTypeStrategy(timestampKind);
@@ -110,6 +116,10 @@ public final class SpecificInputTypeStrategies {
                             repeatingSequence(
                                     and(logical(LogicalTypeFamily.CHARACTER_STRING), LITERAL),
                                     JSON_ARGUMENT));
+
+    /** Input strategy for {@link BuiltInFunctionDefinitions#ML_PREDICT}. */
+    public static final InputTypeStrategy ML_PREDICT_INPUT_TYPE_STRATEGY =
+            MLPredictTypeStrategy.ML_PREDICT_INPUT_TYPE_STRATEGY;
 
     /** See {@link ExtractInputTypeStrategy}. */
     public static final InputTypeStrategy EXTRACT = new ExtractInputTypeStrategy();
@@ -171,6 +181,9 @@ public final class SpecificInputTypeStrategies {
      * BuiltInFunctionDefinitions#LEAD}.
      */
     public static final InputTypeStrategy LEAD_LAG = new LeadLagInputTypeStrategy();
+
+    /** Type strategy for {@link BuiltInFunctionDefinitions#TO_TIMESTAMP_LTZ}. */
+    public static final InputTypeStrategy TO_TIMESTAMP_LTZ = new ToTimestampLtzInputTypeStrategy();
 
     private SpecificInputTypeStrategies() {
         // no instantiation

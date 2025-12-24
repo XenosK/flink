@@ -445,7 +445,11 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
                             getEnvironment().getJobID(),
                             new ThreadPoolExecutor(
                                     0,
-                                    configuration.getMaxConcurrentCheckpoints() + 1,
+                                    getJobConfiguration()
+                                                    .get(
+                                                            CheckpointingOptions
+                                                                    .MAX_CONCURRENT_CHECKPOINTS)
+                                            + 1,
                                     60L,
                                     TimeUnit.SECONDS,
                                     new LinkedBlockingQueue<>(),
@@ -488,7 +492,7 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
             final CheckpointStorageAccess finalCheckpointStorageAccess = checkpointStorageAccess;
 
             ChannelStateWriter channelStateWriter =
-                    configuration.isUnalignedCheckpointsEnabled()
+                    CheckpointingOptions.isUnalignedCheckpointEnabled(getJobConfiguration())
                             ? openChannelStateWriter(
                                     getName(),
                                     // Note: don't pass checkpointStorageAccess directly to channel
@@ -513,7 +517,10 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
                                         }
                                     },
                                     environment,
-                                    configuration.getMaxSubtasksPerChannelStateFile())
+                                    getJobConfiguration()
+                                            .get(
+                                                    CheckpointingOptions
+                                                            .UNALIGNED_MAX_SUBTASKS_PER_CHANNEL_STATE_FILE))
                             : ChannelStateWriter.NO_OP;
             this.subtaskCheckpointCoordinator =
                     new SubtaskCheckpointCoordinatorImpl(
@@ -524,7 +531,8 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
                             environment,
                             this,
                             this::prepareInputSnapshot,
-                            configuration.getMaxConcurrentCheckpoints(),
+                            getJobConfiguration()
+                                    .get(CheckpointingOptions.MAX_CONCURRENT_CHECKPOINTS),
                             channelStateWriter,
                             configuration
                                     .getConfiguration()
@@ -1056,15 +1064,16 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
         return configuration
                         .getConfiguration()
                         .get(CheckpointingOptions.ENABLE_CHECKPOINTS_AFTER_TASKS_FINISH)
-                && configuration.isCheckpointingEnabled();
+                && CheckpointingOptions.isCheckpointingEnabled(getJobConfiguration());
     }
 
     @Override
     public final void cleanUp(Throwable throwable) throws Exception {
         LOG.debug(
-                "Cleanup StreamTask (operators closed: {}, cancelled: {})",
-                closedOperators,
-                canceled);
+                String.format(
+                        "Cleanup StreamTask (operators closed: %b, cancelled: %b)",
+                        closedOperators, canceled),
+                throwable);
 
         failing = !canceled && throwable != null;
 
@@ -1263,8 +1272,14 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
             CheckpointMetaData checkpointMetaData, CheckpointOptions checkpointOptions) {
         checkForcedFullSnapshotSupport(checkpointOptions);
 
+        MailboxExecutor.MailOptions mailOptions =
+                CheckpointOptions.AlignmentType.UNALIGNED == checkpointOptions.getAlignment()
+                        ? MailboxExecutor.MailOptions.urgent()
+                        : MailboxExecutor.MailOptions.options();
+
         CompletableFuture<Boolean> result = new CompletableFuture<>();
         mainMailboxExecutor.execute(
+                mailOptions,
                 () -> {
                     try {
                         boolean noUnfinishedInputGates =

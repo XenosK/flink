@@ -19,15 +19,18 @@
 package org.apache.flink.table.planner.plan.nodes.physical.stream;
 
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
+import org.apache.flink.table.planner.hint.StateTtlHint;
 import org.apache.flink.table.planner.plan.metadata.FlinkRelMetadataQuery;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecMultiJoin;
+import org.apache.flink.table.planner.plan.trait.FlinkRelDistribution;
+import org.apache.flink.table.planner.plan.trait.FlinkRelDistributionTraitDef;
+import org.apache.flink.table.planner.plan.utils.RelExplainUtil;
+import org.apache.flink.table.planner.utils.JavaScalaConversionUtil;
 import org.apache.flink.table.runtime.operators.join.FlinkJoinType;
-import org.apache.flink.table.runtime.operators.join.stream.keyselector.AttributeBasedJoinKeyExtractor;
 import org.apache.flink.table.runtime.operators.join.stream.keyselector.AttributeBasedJoinKeyExtractor.ConditionAttributeRef;
 import org.apache.flink.table.runtime.operators.join.stream.keyselector.JoinKeyExtractor;
-import org.apache.flink.table.types.logical.RowType;
 
 import org.apache.calcite.linq4j.Ord;
 import org.apache.calcite.plan.RelOptCluster;
@@ -50,6 +53,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -79,6 +84,10 @@ public class StreamPhysicalMultiJoin extends AbstractRelNode implements StreamPh
     private final @Nullable RexNode postJoinFilter;
     private final List<RelHint> hints;
 
+    // Cached derived properties to avoid recomputation
+    private @Nullable RexNode multiJoinCondition;
+    private @Nullable List<List<int[]>> inputUniqueKeys;
+
     public StreamPhysicalMultiJoin(
             final RelOptCluster cluster,
             final RelTraitSet traitSet,
@@ -89,7 +98,8 @@ public class StreamPhysicalMultiJoin extends AbstractRelNode implements StreamPh
             final List<JoinRelType> joinTypes,
             final Map<Integer, List<ConditionAttributeRef>> joinAttributeMap,
             final @Nullable RexNode postJoinFilter,
-            final List<RelHint> hints) {
+            final List<RelHint> hints,
+            final JoinKeyExtractor keyExtractor) {
         super(cluster, traitSet);
         this.inputs = inputs;
         this.rowType = rowType;
@@ -99,11 +109,9 @@ public class StreamPhysicalMultiJoin extends AbstractRelNode implements StreamPh
         this.joinAttributeMap = joinAttributeMap;
         this.postJoinFilter = postJoinFilter;
         this.hints = hints;
-        final List<RowType> inputRowTypes =
-                inputs.stream()
-                        .map(i -> FlinkTypeFactory.toLogicalRowType(i.getRowType()))
-                        .collect(Collectors.toList());
-        this.keyExtractor = new AttributeBasedJoinKeyExtractor(joinAttributeMap, inputRowTypes);
+        this.keyExtractor = keyExtractor;
+        this.multiJoinCondition = getMultiJoinCondition();
+        this.inputUniqueKeys = getUniqueKeysForInputs();
     }
 
     @Override
@@ -122,6 +130,9 @@ public class StreamPhysicalMultiJoin extends AbstractRelNode implements StreamPh
         final List<RelNode> newInputs = new ArrayList<>(inputs);
         newInputs.set(ordinalInParent, p);
         this.inputs = List.copyOf(newInputs);
+        // Invalidate cached derived properties since inputs changed
+        this.multiJoinCondition = null;
+        this.inputUniqueKeys = null;
         recomputeDigest();
     }
 
@@ -137,7 +148,8 @@ public class StreamPhysicalMultiJoin extends AbstractRelNode implements StreamPh
                 joinTypes,
                 joinAttributeMap,
                 postJoinFilter,
-                hints);
+                hints,
+                keyExtractor);
     }
 
     @Override
@@ -152,10 +164,16 @@ public class StreamPhysicalMultiJoin extends AbstractRelNode implements StreamPh
         for (final Ord<RelNode> ord : Ord.zip(inputs)) {
             pw.input("input#" + ord.i, ord.e);
         }
-        return pw.item("joinFilter", joinFilter)
-                .item("joinTypes", joinTypes)
-                .item("joinConditions", joinConditions)
-                .itemIf("postJoinFilter", postJoinFilter, postJoinFilter != null)
+
+        return pw.item("commonJoinKey", getCommonJoinKeyFieldNames())
+                .item("joinTypes", formatJoinTypes())
+                .item("inputUniqueKeys", formatInputUniqueKeysWithFieldNames())
+                .itemIf("stateTtlHints", RelExplainUtil.hintsToString(hints), !hints.isEmpty())
+                .item("joinConditions", formatJoinConditionsWithFieldNames(pw))
+                .itemIf(
+                        "postJoinFilter",
+                        formatExpressionWithFieldNames(postJoinFilter, pw),
+                        postJoinFilter != null)
                 .item("select", String.join(",", getRowType().getFieldNames()))
                 .item("rowType", getRowType());
     }
@@ -167,53 +185,79 @@ public class StreamPhysicalMultiJoin extends AbstractRelNode implements StreamPh
 
     @Override
     public ExecNode<?> translateToExecNode() {
-        final RexNode multiJoinCondition = createMultiJoinCondition();
-        final List<List<int[]>> inputUpsertKeys = getUpsertKeysForInputs();
+        final RexNode multijoinCondition = getMultiJoinCondition();
+        final List<List<int[]>> localInputUniqueKeys = getUniqueKeysForInputs();
         final List<FlinkJoinType> execJoinTypes = getExecJoinTypes();
+        final List<InputProperty> inputProperties = createInputProperties();
 
         return new StreamExecMultiJoin(
                 unwrapTableConfig(this),
                 execJoinTypes,
                 joinConditions,
-                multiJoinCondition,
+                multijoinCondition,
                 joinAttributeMap,
-                inputUpsertKeys,
-                Collections.emptyMap(), // TODO Enable hint-based state ttl. See ticket
-                // TODO https://issues.apache.org/jira/browse/FLINK-37936
-                inputs.stream().map(i -> InputProperty.DEFAULT).collect(Collectors.toList()),
+                localInputUniqueKeys,
+                StateTtlHint.getStateTtlFromHintOnMultiRel(this.hints),
+                inputProperties,
                 FlinkTypeFactory.toLogicalRowType(getRowType()),
                 getRelDetailedDescription());
     }
 
     private RexNode createMultiJoinCondition() {
         final List<RexNode> conjunctions = new ArrayList<>();
+
+        for (RexNode joinCondition : joinConditions) {
+            if (joinCondition != null) {
+                conjunctions.add(joinCondition);
+            }
+        }
+
         conjunctions.add(joinFilter);
+
         if (postJoinFilter != null) {
             conjunctions.add(postJoinFilter);
         }
+
         return RexUtil.composeConjunction(getCluster().getRexBuilder(), conjunctions, true);
     }
 
-    private List<List<int[]>> getUpsertKeysForInputs() {
-        return inputs.stream()
-                .map(
-                        input -> {
-                            final Set<ImmutableBitSet> upsertKeys = getUpsertKeys(input);
+    public List<List<int[]>> getUniqueKeysForInputs() {
+        if (inputUniqueKeys == null) {
+            inputUniqueKeys =
+                    inputs.stream()
+                            .map(
+                                    input -> {
+                                        final Set<ImmutableBitSet> uniqueKeys =
+                                                getUniqueKeys(input);
 
-                            if (upsertKeys == null) {
-                                return Collections.<int[]>emptyList();
-                            }
-                            return upsertKeys.stream()
-                                    .map(ImmutableBitSet::toArray)
-                                    .collect(Collectors.toList());
-                        })
-                .collect(Collectors.toList());
+                                        if (uniqueKeys == null) {
+                                            return Collections.<int[]>emptyList();
+                                        }
+
+                                        return uniqueKeys.stream()
+                                                .map(ImmutableBitSet::toArray)
+                                                .collect(Collectors.toList());
+                                    })
+                            .collect(Collectors.toUnmodifiableList());
+        }
+        return inputUniqueKeys;
     }
 
-    private @Nullable Set<ImmutableBitSet> getUpsertKeys(RelNode input) {
+    public int[] getJoinKeyIndices(int inputId) {
+        return keyExtractor.getJoinKeyIndices(inputId);
+    }
+
+    private @Nullable Set<ImmutableBitSet> getUniqueKeys(RelNode input) {
         final FlinkRelMetadataQuery fmq =
                 FlinkRelMetadataQuery.reuseOrCreate(input.getCluster().getMetadataQuery());
-        return fmq.getUpsertKeys(input);
+        return fmq.getUniqueKeys(input);
+    }
+
+    public RexNode getMultiJoinCondition() {
+        if (multiJoinCondition == null) {
+            multiJoinCondition = createMultiJoinCondition();
+        }
+        return multiJoinCondition;
     }
 
     private List<FlinkJoinType> getExecJoinTypes() {
@@ -237,9 +281,105 @@ public class StreamPhysicalMultiJoin extends AbstractRelNode implements StreamPh
     }
 
     /**
+     * Returns the common join key field names as a comma-separated string. Uses the field names
+     * from the first input to map the common join key indices.
+     *
+     * @return comma-separated string of common join key field names, or empty string if no common
+     *     join key
+     */
+    private String getCommonJoinKeyFieldNames() {
+        final int[] commonJoinKeyIndices = keyExtractor.getCommonJoinKeyIndices(0);
+        final RelNode firstInput = inputs.get(0);
+        final List<String> fieldNames = firstInput.getRowType().getFieldNames();
+        final List<String> commonJoinKey = new ArrayList<>();
+
+        for (final int index : commonJoinKeyIndices) {
+            if (index < fieldNames.size()) {
+                commonJoinKey.add(fieldNames.get(index));
+            }
+        }
+
+        if (commonJoinKey.isEmpty()) {
+            return "noCommonJoinKey";
+        }
+
+        return String.join(", ", commonJoinKey);
+    }
+
+    /**
+     * Formats a RexNode expression with field names for better readability in explain output.
+     *
+     * @param expression the expression to format
+     * @param pw the RelWriter for determining format preferences
+     * @return formatted expression string with field names
+     */
+    private String formatExpressionWithFieldNames(final RexNode expression, final RelWriter pw) {
+        if (expression == null) {
+            return "";
+        }
+
+        return getExpressionString(
+                expression,
+                JavaScalaConversionUtil.toScala(getRowType().getFieldNames()).toList(),
+                JavaScalaConversionUtil.toScala(Optional.empty()),
+                RelExplainUtil.preferExpressionFormat(pw),
+                RelExplainUtil.preferExpressionDetail(pw));
+    }
+
+    /**
+     * Formats join conditions with field names for better readability in explain output.
+     *
+     * @param pw the RelWriter for determining format preferences
+     * @return formatted join conditions string with field names
+     */
+    private String formatJoinConditionsWithFieldNames(final RelWriter pw) {
+        return joinConditions.stream()
+                .skip(1)
+                .filter(Objects::nonNull)
+                .map(condition -> formatExpressionWithFieldNames(condition, pw))
+                .collect(Collectors.joining(", "));
+    }
+
+    private String formatJoinTypes() {
+        return joinTypes.stream()
+                .skip(1)
+                .map(JoinRelType::toString)
+                .collect(Collectors.joining(", "));
+    }
+
+    private String formatInputUniqueKeysWithFieldNames() {
+        final List<String> inputUniqueKeyStrings = new ArrayList<>();
+        for (final RelNode input : inputs) {
+            final Set<ImmutableBitSet> uniqueKeys = getUniqueKeys(input);
+
+            if (uniqueKeys != null && !uniqueKeys.isEmpty()) {
+                final List<String> fieldNames = input.getRowType().getFieldNames();
+                final List<String> uniqueKeyStrings = new ArrayList<>();
+                for (final ImmutableBitSet uniqueKey : uniqueKeys) {
+                    final List<String> keyFieldNames = new ArrayList<>();
+                    for (final int index : uniqueKey.toArray()) {
+                        if (index < fieldNames.size()) {
+                            keyFieldNames.add(fieldNames.get(index));
+                        }
+                    }
+                    if (!keyFieldNames.isEmpty()) {
+                        uniqueKeyStrings.add("(" + String.join(", ", keyFieldNames) + ")");
+                    }
+                }
+
+                inputUniqueKeyStrings.add(String.join(", ", uniqueKeyStrings));
+            } else {
+                inputUniqueKeyStrings.add("noUniqueKey");
+            }
+        }
+
+        return String.join(", ", inputUniqueKeyStrings);
+    }
+
+    /**
      * This is mainly used in `FlinkChangelogModeInferenceProgram.SatisfyUpdateKindTraitVisitor`. If
      * the unique key of input is a superset of the common join key, then we can ignore
-     * UPDATE_BEFORE. Otherwise, it we can't ignore UPDATE_BEFORE.
+     * UPDATE_BEFORE. Otherwise, we can't ignore UPDATE_BEFORE.
      *
      * <p>For example, if the input schema is [id, name, cnt] with the unique key (id) and the
      * common join key is (id, name) across joins, then an insert and update on the id:
@@ -255,8 +395,8 @@ public class StreamPhysicalMultiJoin extends AbstractRelNode implements StreamPh
      */
     public boolean inputUniqueKeyContainsCommonJoinKey(int inputId) {
         final RelNode input = getInputs().get(inputId);
-        final Set<ImmutableBitSet> inputUniqueKeys = getUpsertKeys(input);
-        if (inputUniqueKeys == null || inputUniqueKeys.isEmpty()) {
+        final Set<ImmutableBitSet> inputUniqueKeysSet = getUniqueKeys(input);
+        if (inputUniqueKeysSet == null || inputUniqueKeysSet.isEmpty()) {
             return false;
         }
 
@@ -266,7 +406,50 @@ public class StreamPhysicalMultiJoin extends AbstractRelNode implements StreamPh
         }
 
         final ImmutableBitSet commonJoinKeys = ImmutableBitSet.of(commonJoinKeyIndices);
+        return inputUniqueKeysSet.stream()
+                .anyMatch(uniqueKey -> uniqueKey.contains(commonJoinKeys));
+    }
 
-        return inputUniqueKeys.stream().anyMatch(uniqueKey -> uniqueKey.contains(commonJoinKeys));
+    private List<InputProperty> createInputProperties() {
+        final List<InputProperty> inputProperties = new ArrayList<>();
+
+        for (int i = 0; i < inputs.size(); i++) {
+            final InputProperty inputProperty = createInputPropertyFromTrait(getInput(i), i);
+            inputProperties.add(inputProperty);
+        }
+
+        return inputProperties;
+    }
+
+    private InputProperty createInputPropertyFromTrait(final RelNode input, final int inputIndex) {
+        final FlinkRelDistribution distribution =
+                input.getTraitSet().getTrait(FlinkRelDistributionTraitDef.INSTANCE());
+
+        if (distribution == null) {
+            return InputProperty.DEFAULT;
+        }
+
+        final InputProperty.RequiredDistribution requiredDistribution;
+        switch (distribution.getType()) {
+            case HASH_DISTRIBUTED:
+                final int[] keys = distribution.getKeys().toIntArray();
+                if (keys.length == 0) {
+                    requiredDistribution = InputProperty.SINGLETON_DISTRIBUTION;
+                } else {
+                    requiredDistribution = InputProperty.hashDistribution(keys);
+                }
+                break;
+            case SINGLETON:
+                requiredDistribution = InputProperty.SINGLETON_DISTRIBUTION;
+                break;
+            default:
+                return InputProperty.DEFAULT;
+        }
+
+        return InputProperty.builder()
+                .requiredDistribution(requiredDistribution)
+                .damBehavior(InputProperty.DamBehavior.PIPELINED)
+                .priority(inputIndex)
+                .build();
     }
 }

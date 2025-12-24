@@ -19,11 +19,10 @@
 package org.apache.flink.runtime.scheduler.adaptive.allocator;
 
 import org.apache.flink.annotation.VisibleForTesting;
-import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
-import org.apache.flink.runtime.jobmaster.SlotInfo;
+import org.apache.flink.runtime.clusterframework.types.ResourceID;
+import org.apache.flink.runtime.jobmaster.slotpool.PhysicalSlot;
 import org.apache.flink.runtime.scheduler.adaptive.JobSchedulingPlan.SlotAssignment;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.SlotSharingSlotAllocator.ExecutionSlotSharingGroup;
-import org.apache.flink.runtime.taskmanager.TaskManagerLocation;
 
 import javax.annotation.Nullable;
 
@@ -34,11 +33,9 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
-import static java.util.function.Function.identity;
 import static org.apache.flink.runtime.scheduler.adaptive.allocator.AllocatorUtil.checkMinimumRequiredSlots;
-import static org.apache.flink.runtime.scheduler.adaptive.allocator.AllocatorUtil.createExecutionSlotSharingGroups;
+import static org.apache.flink.runtime.scheduler.adaptive.allocator.AllocatorUtil.getSlotsPerTaskExecutor;
 
 /**
  * Simple {@link SlotAssigner} that treats all slots and slot sharing groups equally. Specifically,
@@ -53,45 +50,46 @@ public class DefaultSlotAssigner implements SlotAssigner {
 
     private final @Nullable String executionTarget;
     private final boolean minimalTaskManagerPreferred;
+    private final SlotSharingResolver slotSharingResolver;
+    private final SlotMatchingResolver slotMatchingResolver;
 
-    DefaultSlotAssigner(@Nullable String executionTarget, boolean minimalTaskManagerPreferred) {
+    DefaultSlotAssigner(
+            @Nullable String executionTarget,
+            boolean minimalTaskManagerPreferred,
+            SlotSharingResolver slotSharingResolver,
+            SlotMatchingResolver slotMatchingResolver) {
         this.executionTarget = executionTarget;
         this.minimalTaskManagerPreferred = minimalTaskManagerPreferred;
+        this.slotSharingResolver = slotSharingResolver;
+        this.slotMatchingResolver = slotMatchingResolver;
     }
 
     @Override
     public Collection<SlotAssignment> assignSlots(
             JobInformation jobInformation,
-            Collection<? extends SlotInfo> freeSlots,
+            Collection<PhysicalSlot> freeSlots,
             VertexParallelism vertexParallelism,
             JobAllocationsInformation previousAllocations) {
         checkMinimumRequiredSlots(jobInformation, freeSlots);
 
-        final List<ExecutionSlotSharingGroup> allGroups = new ArrayList<>();
-        for (SlotSharingGroup slotSharingGroup : jobInformation.getSlotSharingGroups()) {
-            allGroups.addAll(createExecutionSlotSharingGroups(vertexParallelism, slotSharingGroup));
-        }
+        final Collection<ExecutionSlotSharingGroup> allGroups =
+                slotSharingResolver.getExecutionSlotSharingGroups(
+                        jobInformation, vertexParallelism);
 
-        final Collection<? extends SlotInfo> pickedSlots =
-                pickSlotsIfNeeded(allGroups.size(), freeSlots);
+        final Collection<PhysicalSlot> pickedSlots = pickSlotsIfNeeded(allGroups.size(), freeSlots);
 
-        Iterator<? extends SlotInfo> iterator = pickedSlots.iterator();
-        Collection<SlotAssignment> assignments = new ArrayList<>();
-        for (ExecutionSlotSharingGroup group : allGroups) {
-            assignments.add(new SlotAssignment(iterator.next(), group));
-        }
-        return assignments;
+        return slotMatchingResolver.matchSlotSharingGroupWithSlots(allGroups, pickedSlots);
     }
 
     @VisibleForTesting
-    Collection<? extends SlotInfo> pickSlotsIfNeeded(
-            int requestExecutionSlotSharingGroups, Collection<? extends SlotInfo> freeSlots) {
-        Collection<? extends SlotInfo> pickedSlots = freeSlots;
+    Collection<PhysicalSlot> pickSlotsIfNeeded(
+            int requestExecutionSlotSharingGroups, Collection<PhysicalSlot> freeSlots) {
+        Collection<PhysicalSlot> pickedSlots = freeSlots;
         if (APPLICATION_MODE_EXECUTION_TARGET.equalsIgnoreCase(executionTarget)
                 && minimalTaskManagerPreferred
                 // To avoid the sort-work loading.
                 && freeSlots.size() > requestExecutionSlotSharingGroups) {
-            final Map<TaskManagerLocation, ? extends Set<? extends SlotInfo>> slotsPerTaskExecutor =
+            final Map<ResourceID, Set<PhysicalSlot>> slotsPerTaskExecutor =
                     getSlotsPerTaskExecutor(freeSlots);
             pickedSlots =
                     pickSlotsInMinimalTaskExecutors(
@@ -108,13 +106,13 @@ public class DefaultSlotAssigner implements SlotAssigner {
      * @param slotsPerTaskExecutor The slots per task manager.
      * @return The ordered task manager that orders by the number of free slots descending.
      */
-    private Iterator<TaskManagerLocation> getSortedTaskExecutors(
-            Map<TaskManagerLocation, ? extends Set<? extends SlotInfo>> slotsPerTaskExecutor) {
-        final Comparator<TaskManagerLocation> taskExecutorComparator =
-                (leftTml, rightTml) ->
+    private Iterator<ResourceID> getSortedTaskExecutors(
+            Map<ResourceID, Set<PhysicalSlot>> slotsPerTaskExecutor) {
+        final Comparator<ResourceID> taskExecutorComparator =
+                (leftTm, rightTm) ->
                         Integer.compare(
-                                slotsPerTaskExecutor.get(rightTml).size(),
-                                slotsPerTaskExecutor.get(leftTml).size());
+                                slotsPerTaskExecutor.get(rightTm).size(),
+                                slotsPerTaskExecutor.get(leftTm).size());
         return slotsPerTaskExecutor.keySet().stream().sorted(taskExecutorComparator).iterator();
     }
 
@@ -125,25 +123,15 @@ public class DefaultSlotAssigner implements SlotAssigner {
      * @param requestedGroups the number of the request execution slot sharing groups.
      * @return the target slots that are distributed on the minimal task executors.
      */
-    private Collection<? extends SlotInfo> pickSlotsInMinimalTaskExecutors(
-            Map<TaskManagerLocation, ? extends Set<? extends SlotInfo>> slotsByTaskExecutor,
-            int requestedGroups) {
-        final List<SlotInfo> pickedSlots = new ArrayList<>();
-        final Iterator<TaskManagerLocation> sortedTaskExecutors =
+    private Collection<PhysicalSlot> pickSlotsInMinimalTaskExecutors(
+            Map<ResourceID, Set<PhysicalSlot>> slotsByTaskExecutor, int requestedGroups) {
+        final List<PhysicalSlot> pickedSlots = new ArrayList<>();
+        final Iterator<ResourceID> sortedTaskExecutors =
                 getSortedTaskExecutors(slotsByTaskExecutor);
         while (pickedSlots.size() < requestedGroups) {
-            Set<? extends SlotInfo> slotInfos = slotsByTaskExecutor.get(sortedTaskExecutors.next());
+            Set<PhysicalSlot> slotInfos = slotsByTaskExecutor.get(sortedTaskExecutors.next());
             pickedSlots.addAll(slotInfos);
         }
         return pickedSlots;
-    }
-
-    private Map<TaskManagerLocation, ? extends Set<? extends SlotInfo>> getSlotsPerTaskExecutor(
-            Collection<? extends SlotInfo> slots) {
-        return slots.stream()
-                .collect(
-                        Collectors.groupingBy(
-                                SlotInfo::getTaskManagerLocation,
-                                Collectors.mapping(identity(), Collectors.toSet())));
     }
 }

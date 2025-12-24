@@ -22,6 +22,9 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.Schema.Builder;
 import org.apache.flink.table.api.TableException;
+import org.apache.flink.table.catalog.CatalogMaterializedTable.LogicalRefreshMode;
+import org.apache.flink.table.catalog.CatalogMaterializedTable.RefreshMode;
+import org.apache.flink.table.catalog.CatalogMaterializedTable.RefreshStatus;
 import org.apache.flink.table.catalog.Column.ComputedColumn;
 import org.apache.flink.table.catalog.Column.MetadataColumn;
 import org.apache.flink.table.catalog.exceptions.CatalogException;
@@ -90,6 +93,9 @@ public final class CatalogPropertiesUtil {
 
             serializePartitionKeys(properties, resolvedTable.getPartitionKeys());
 
+            final Optional<TableDistribution> distribution = resolvedTable.getDistribution();
+            distribution.ifPresent(d -> serializeTableDistribution(properties, d));
+
             properties.putAll(resolvedTable.getOptions());
 
             properties.remove(IS_GENERIC); // reserved option
@@ -136,7 +142,7 @@ public final class CatalogPropertiesUtil {
                     properties, resolvedMaterializedTable.getResolvedSchema(), sqlFactory);
 
             final String comment = resolvedMaterializedTable.getComment();
-            if (comment != null && comment.length() > 0) {
+            if (comment != null && !comment.isEmpty()) {
                 properties.put(COMMENT, comment);
             }
 
@@ -145,9 +151,14 @@ public final class CatalogPropertiesUtil {
 
             serializePartitionKeys(properties, resolvedMaterializedTable.getPartitionKeys());
 
+            final Optional<TableDistribution> distribution =
+                    resolvedMaterializedTable.getDistribution();
+            distribution.ifPresent(d -> serializeTableDistribution(properties, d));
+
             properties.putAll(resolvedMaterializedTable.getOptions());
 
-            properties.put(DEFINITION_QUERY, resolvedMaterializedTable.getDefinitionQuery());
+            properties.put(ORIGINAL_QUERY, resolvedMaterializedTable.getOriginalQuery());
+            properties.put(EXPANDED_QUERY, resolvedMaterializedTable.getExpandedQuery());
 
             IntervalFreshness intervalFreshness =
                     resolvedMaterializedTable.getDefinitionFreshness();
@@ -235,12 +246,16 @@ public final class CatalogPropertiesUtil {
 
             final List<String> partitionKeys = deserializePartitionKeys(properties);
 
-            final Map<String, String> options = deserializeOptions(properties, schemaKey);
+            final Map<String, String> options = deserializeOptions(properties);
+
+            final @Nullable TableDistribution distribution =
+                    deserializeTableDistribution(properties);
 
             return CatalogTable.newBuilder()
                     .schema(schema)
                     .comment(comment)
                     .partitionKeys(partitionKeys)
+                    .distribution(distribution)
                     .options(options)
                     .snapshot(snapshot)
                     .build();
@@ -267,22 +282,21 @@ public final class CatalogPropertiesUtil {
 
             final List<String> partitionKeys = deserializePartitionKeys(properties);
 
-            final Map<String, String> options = deserializeOptions(properties, SCHEMA);
+            final Map<String, String> options = deserializeOptions(properties);
 
-            final String definitionQuery = properties.get(DEFINITION_QUERY);
+            final String originalQuery = properties.get(ORIGINAL_QUERY);
+            final String expandedQuery = properties.get(EXPANDED_QUERY);
 
             final String freshnessInterval = properties.get(FRESHNESS_INTERVAL);
             final IntervalFreshness.TimeUnit timeUnit =
                     IntervalFreshness.TimeUnit.valueOf(properties.get(FRESHNESS_UNIT));
             final IntervalFreshness freshness = IntervalFreshness.of(freshnessInterval, timeUnit);
 
-            final CatalogMaterializedTable.LogicalRefreshMode logicalRefreshMode =
-                    CatalogMaterializedTable.LogicalRefreshMode.valueOf(
-                            properties.get(LOGICAL_REFRESH_MODE));
-            final CatalogMaterializedTable.RefreshMode refreshMode =
-                    CatalogMaterializedTable.RefreshMode.valueOf(properties.get(REFRESH_MODE));
-            final CatalogMaterializedTable.RefreshStatus refreshStatus =
-                    CatalogMaterializedTable.RefreshStatus.valueOf(properties.get(REFRESH_STATUS));
+            final LogicalRefreshMode logicalRefreshMode =
+                    LogicalRefreshMode.valueOf(properties.get(LOGICAL_REFRESH_MODE));
+            final RefreshMode refreshMode = RefreshMode.valueOf(properties.get(REFRESH_MODE));
+            final RefreshStatus refreshStatus =
+                    RefreshStatus.valueOf(properties.get(REFRESH_STATUS));
 
             final @Nullable String refreshHandlerDesc = properties.get(REFRESH_HANDLER_DESC);
             final @Nullable String refreshHandlerStringBytes =
@@ -292,13 +306,18 @@ public final class CatalogPropertiesUtil {
                             ? null
                             : decodeBase64ToBytes(refreshHandlerStringBytes);
 
+            final @Nullable TableDistribution distribution =
+                    deserializeTableDistribution(properties);
+
             CatalogMaterializedTable.Builder builder = CatalogMaterializedTable.newBuilder();
             builder.schema(schema)
                     .comment(comment)
                     .partitionKeys(partitionKeys)
+                    .distribution(distribution)
                     .options(options)
                     .snapshot(snapshot)
-                    .definitionQuery(definitionQuery)
+                    .originalQuery(originalQuery)
+                    .expandedQuery(expandedQuery)
                     .freshness(freshness)
                     .logicalRefreshMode(logicalRefreshMode)
                     .refreshMode(refreshMode)
@@ -327,9 +346,7 @@ public final class CatalogPropertiesUtil {
             deserializeColumns(properties, MODEL_OUTPUT_SCHEMA, outputSchemaBuilder);
             final Schema outputSchema = outputSchemaBuilder.build();
 
-            final Map<String, String> modelOptions =
-                    deserializeOptions(
-                            properties, Arrays.asList(MODEL_INPUT_SCHEMA, MODEL_OUTPUT_SCHEMA));
+            final Map<String, String> modelOptions = deserializeOptions(properties);
 
             final @Nullable String comment = properties.get(COMMENT);
 
@@ -392,7 +409,9 @@ public final class CatalogPropertiesUtil {
 
     private static final String SNAPSHOT = "snapshot";
 
-    private static final String DEFINITION_QUERY = "definition-query";
+    private static final String ORIGINAL_QUERY = "original-query";
+
+    private static final String EXPANDED_QUERY = "expanded-query";
 
     private static final String FRESHNESS_INTERVAL = "freshness-interval";
 
@@ -412,31 +431,33 @@ public final class CatalogPropertiesUtil {
 
     private static final String MODEL_OUTPUT_SCHEMA = "output-schema";
 
-    private static Map<String, String> deserializeOptions(
-            Map<String, String> map, String schemaKey) {
-        return deserializeOptions(map, Collections.singletonList(schemaKey));
-    }
+    private static final String DISTRIBUTION = "distribution";
 
-    private static Map<String, String> deserializeOptions(
-            Map<String, String> map, List<String> schemaKeys) {
+    private static final String DISTRIBUTION_KIND = DISTRIBUTION + ".kind";
+
+    private static final String DISTRIBUTION_BUCKETS = DISTRIBUTION + ".buckets";
+
+    private static final String DISTRIBUTION_KEYS = compoundKey(DISTRIBUTION, KEYS);
+
+    private static Map<String, String> deserializeOptions(Map<String, String> map) {
         return map.entrySet().stream()
                 .filter(
                         e -> {
                             final String key = e.getKey();
-                            return schemaKeys.stream()
-                                            .noneMatch(
-                                                    schemaKey ->
-                                                            key.startsWith(schemaKey + SEPARATOR))
+                            return !key.startsWith(DISTRIBUTION + SEPARATOR)
                                     && !key.startsWith(PARTITION_KEYS + SEPARATOR)
+                                    && !key.startsWith(SCHEMA)
                                     && !key.equals(COMMENT)
                                     && !key.equals(SNAPSHOT)
-                                    && !isMaterializedTableAttribute(key);
+                                    && !isMaterializedTableAttribute(key)
+                                    && !isModelAttribute(key);
                         })
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }
 
     private static boolean isMaterializedTableAttribute(String key) {
-        return key.equals(DEFINITION_QUERY)
+        return key.equals(ORIGINAL_QUERY)
+                || key.equals(EXPANDED_QUERY)
                 || key.equals(FRESHNESS_INTERVAL)
                 || key.equals(FRESHNESS_UNIT)
                 || key.equals(LOGICAL_REFRESH_MODE)
@@ -444,6 +465,11 @@ public final class CatalogPropertiesUtil {
                 || key.equals(REFRESH_STATUS)
                 || key.equals(REFRESH_HANDLER_DESC)
                 || key.equals(REFRESH_HANDLER_BYTES);
+    }
+
+    private static boolean isModelAttribute(String key) {
+        return key.startsWith(MODEL_INPUT_SCHEMA + SEPARATOR)
+                || key.startsWith(MODEL_OUTPUT_SCHEMA + SEPARATOR);
     }
 
     private static List<String> deserializePartitionKeys(Map<String, String> map) {
@@ -455,6 +481,29 @@ public final class CatalogPropertiesUtil {
             partitionKeys.add(partitionName);
         }
         return partitionKeys;
+    }
+
+    private static TableDistribution deserializeTableDistribution(Map<String, String> map) {
+        final String distributionKind = map.get(DISTRIBUTION_KIND);
+        if (distributionKind == null) {
+            return null;
+        }
+
+        final TableDistribution.Kind kind = TableDistribution.Kind.valueOf(distributionKind);
+        final Integer bucketCount =
+                map.get(DISTRIBUTION_BUCKETS) == null
+                        ? null
+                        : Integer.valueOf(map.get(DISTRIBUTION_BUCKETS));
+
+        final List<String> bucketKeys = new ArrayList<>();
+        int i = 0;
+        String bucketNameKey = compoundKey(DISTRIBUTION_KEYS, i, NAME);
+        while (map.containsKey(bucketNameKey)) {
+            final String bucketName = getValue(map, bucketNameKey);
+            bucketKeys.add(bucketName);
+            bucketNameKey = compoundKey(DISTRIBUTION_KEYS, ++i, NAME);
+        }
+        return TableDistribution.of(kind, bucketCount, bucketKeys);
     }
 
     private static Schema deserializeSchema(Map<String, String> map, String schemaKey) {
@@ -562,6 +611,26 @@ public final class CatalogPropertiesUtil {
                 PARTITION_KEYS,
                 Collections.singletonList(NAME),
                 keys.stream().map(Collections::singletonList).collect(Collectors.toList()));
+    }
+
+    private static void serializeTableDistribution(
+            Map<String, String> map, TableDistribution distribution) {
+        if (distribution == null) {
+            return;
+        }
+
+        map.put(DISTRIBUTION_KIND, distribution.getKind().name());
+        distribution
+                .getBucketCount()
+                .ifPresent(bc -> map.put(DISTRIBUTION_BUCKETS, String.valueOf(bc.intValue())));
+
+        putIndexedProperties(
+                map,
+                DISTRIBUTION_KEYS,
+                Collections.singletonList(NAME),
+                distribution.getBucketKeys().stream()
+                        .map(Collections::singletonList)
+                        .collect(Collectors.toList()));
     }
 
     private static void serializeResolvedModelSchema(

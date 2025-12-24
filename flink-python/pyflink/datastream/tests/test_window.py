@@ -30,9 +30,10 @@ from pyflink.datastream.window import (TumblingEventTimeWindows,
                                        CountSlidingWindowAssigner, SessionWindowTimeGapExtractor,
                                        CountWindow, PurgingTrigger, EventTimeTrigger, TimeWindow,
                                        GlobalWindows, CountTrigger)
-from pyflink.datastream.tests.test_util import DataStreamTestSinkFunction
+from pyflink.datastream.tests.test_util import DataStreamTestSinkFunction, \
+    SecondColumnTimestampAssigner
 from pyflink.java_gateway import get_gateway
-from pyflink.testing.test_case_utils import PyFlinkStreamingTestCase
+from pyflink.testing.test_case_utils import PyFlinkStreamingTestCase, PyFlinkTestCase
 from pyflink.util.java_utils import get_j_env_configuration
 
 
@@ -637,12 +638,6 @@ class EmbeddedWindowTests(WindowTests, PyFlinkStreamingTestCase):
         self.assert_equals_sorted(expected, results)
 
 
-class SecondColumnTimestampAssigner(TimestampAssigner):
-
-    def extract_timestamp(self, value, record_timestamp) -> int:
-        return int(value[1])
-
-
 class MySessionWindowTimeGapExtractor(SessionWindowTimeGapExtractor):
 
     def extract(self, element: tuple) -> int:
@@ -673,3 +668,27 @@ class CountAllWindowProcessFunction(ProcessAllWindowFunction[tuple, tuple, TimeW
                 context: 'ProcessAllWindowFunction.Context',
                 elements: Iterable[tuple]) -> Iterable[tuple]:
         return [(context.window().start, context.window().end, len([e for e in elements]))]
+
+
+class TestTimeWindow(PyFlinkTestCase):
+
+    def test_le_method(self):
+        """Test the __le__ method of TimeWindow."""
+        # Create test windows
+        w1 = TimeWindow(100, 200)
+        w2 = TimeWindow(100, 200)
+        w3 = TimeWindow(150, 250)
+        w4 = TimeWindow(50, 150)
+        w5 = TimeWindow(100, 180)
+
+        self.assertTrue(w1 <= w2)
+        self.assertTrue(w2 <= w1)
+
+        self.assertTrue(w1 <= w3)
+        self.assertFalse(w3 <= w1)
+
+        self.assertTrue(w4 <= w1)
+        self.assertFalse(w1 < w4)
+
+        self.assertTrue(w5 <= w1)
+        self.assertFalse(w1 <= w5)

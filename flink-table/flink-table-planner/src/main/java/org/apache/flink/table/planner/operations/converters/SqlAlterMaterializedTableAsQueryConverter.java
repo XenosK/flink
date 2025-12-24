@@ -18,144 +18,73 @@
 
 package org.apache.flink.table.planner.operations.converters;
 
-import org.apache.flink.sql.parser.ddl.SqlAlterMaterializedTableAsQuery;
+import org.apache.flink.sql.parser.ddl.materializedtable.SqlAlterMaterializedTableAsQuery;
 import org.apache.flink.table.api.Schema;
-import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.CatalogMaterializedTable;
 import org.apache.flink.table.catalog.Column;
 import org.apache.flink.table.catalog.ObjectIdentifier;
-import org.apache.flink.table.catalog.ResolvedCatalogBaseTable;
 import org.apache.flink.table.catalog.ResolvedCatalogMaterializedTable;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.catalog.TableChange;
-import org.apache.flink.table.catalog.TableChange.MaterializedTableChange;
-import org.apache.flink.table.catalog.UnresolvedIdentifier;
 import org.apache.flink.table.operations.Operation;
 import org.apache.flink.table.operations.materializedtable.AlterMaterializedTableAsQueryOperation;
 import org.apache.flink.table.planner.operations.PlannerQueryOperation;
+import org.apache.flink.table.planner.utils.MaterializedTableUtils;
 
 import org.apache.calcite.sql.SqlNode;
 
 import java.util.ArrayList;
 import java.util.List;
 
-import static org.apache.flink.table.catalog.CatalogBaseTable.TableKind.MATERIALIZED_TABLE;
-
 /** A converter for {@link SqlAlterMaterializedTableAsQuery}. */
 public class SqlAlterMaterializedTableAsQueryConverter
-        implements SqlNodeConverter<SqlAlterMaterializedTableAsQuery> {
+        extends AbstractAlterMaterializedTableConverter<SqlAlterMaterializedTableAsQuery> {
 
     @Override
-    public Operation convertSqlNode(
-            SqlAlterMaterializedTableAsQuery sqlAlterMaterializedTableAsQuery,
+    protected Operation convertToOperation(
+            SqlAlterMaterializedTableAsQuery sqlAlterTableAsQuery,
+            ResolvedCatalogMaterializedTable oldTable,
             ConvertContext context) {
-        ObjectIdentifier identifier = resolveIdentifier(sqlAlterMaterializedTableAsQuery, context);
+        ObjectIdentifier identifier = resolveIdentifier(sqlAlterTableAsQuery, context);
 
         // Validate and extract schema from query
-        String originalQuery =
-                context.toQuotedSqlString(sqlAlterMaterializedTableAsQuery.getAsQuery());
+        String originalQuery = context.toQuotedSqlString(sqlAlterTableAsQuery.getAsQuery());
         SqlNode validatedQuery =
-                context.getSqlValidator().validate(sqlAlterMaterializedTableAsQuery.getAsQuery());
-        // The LATERAL operator was eliminated during sql validation, thus the unparsed SQL
-        // does not contain LATERAL which is problematic,
-        // the issue was resolved in CALCITE-4077
-        // (always treat the table function as implicitly LATERAL).
-        String definitionQuery = context.expandSqlIdentifiers(originalQuery);
+                context.getSqlValidator().validate(sqlAlterTableAsQuery.getAsQuery());
+        String definitionQuery = context.toQuotedSqlString(validatedQuery);
         PlannerQueryOperation queryOperation =
                 new PlannerQueryOperation(
-                        context.toRelRoot(validatedQuery).project(), () -> originalQuery);
-
-        ResolvedCatalogMaterializedTable oldTable =
-                getResolvedMaterializedTable(context, identifier);
+                        context.toRelRoot(validatedQuery).project(), () -> definitionQuery);
+        ResolvedSchema oldSchema = oldTable.getResolvedSchema();
         List<Column> addedColumns =
-                validateAndExtractNewColumns(
-                        oldTable.getResolvedSchema(), queryOperation.getResolvedSchema());
+                MaterializedTableUtils.validateAndExtractNewColumns(
+                        oldSchema, queryOperation.getResolvedSchema());
 
         // Build new materialized table and apply changes
         CatalogMaterializedTable updatedTable =
-                buildUpdatedMaterializedTable(oldTable, addedColumns, definitionQuery);
-        List<MaterializedTableChange> tableChanges = new ArrayList<>();
+                buildUpdatedMaterializedTable(
+                        oldTable, addedColumns, originalQuery, definitionQuery);
+        List<TableChange> tableChanges = new ArrayList<>();
         addedColumns.forEach(column -> tableChanges.add(TableChange.add(column)));
         tableChanges.add(TableChange.modifyDefinitionQuery(definitionQuery));
 
         return new AlterMaterializedTableAsQueryOperation(identifier, tableChanges, updatedTable);
     }
 
-    private ObjectIdentifier resolveIdentifier(
-            SqlAlterMaterializedTableAsQuery sqlAlterTableAsQuery, ConvertContext context) {
-        UnresolvedIdentifier unresolvedIdentifier =
-                UnresolvedIdentifier.of(sqlAlterTableAsQuery.fullTableName());
-        return context.getCatalogManager().qualifyIdentifier(unresolvedIdentifier);
-    }
-
-    private ResolvedCatalogMaterializedTable getResolvedMaterializedTable(
-            ConvertContext context, ObjectIdentifier identifier) {
-        ResolvedCatalogBaseTable<?> baseTable =
-                context.getCatalogManager().getTableOrError(identifier).getResolvedTable();
-        if (MATERIALIZED_TABLE != baseTable.getTableKind()) {
-            throw new ValidationException(
-                    "Only materialized table support modify definition query.");
-        }
-        return (ResolvedCatalogMaterializedTable) baseTable;
-    }
-
     private CatalogMaterializedTable buildUpdatedMaterializedTable(
             ResolvedCatalogMaterializedTable oldTable,
             List<Column> addedColumns,
-            String definitionQuery) {
-
+            String originalQuery,
+            String expandedQuery) {
         Schema.Builder newSchemaBuilder =
                 Schema.newBuilder().fromResolvedSchema(oldTable.getResolvedSchema());
         addedColumns.forEach(col -> newSchemaBuilder.column(col.getName(), col.getDataType()));
 
-        return CatalogMaterializedTable.newBuilder()
-                .schema(newSchemaBuilder.build())
-                .comment(oldTable.getComment())
-                .partitionKeys(oldTable.getPartitionKeys())
-                .options(oldTable.getOptions())
-                .definitionQuery(definitionQuery)
-                .freshness(oldTable.getDefinitionFreshness())
-                .logicalRefreshMode(oldTable.getLogicalRefreshMode())
-                .refreshMode(oldTable.getRefreshMode())
-                .refreshStatus(oldTable.getRefreshStatus())
-                .refreshHandlerDescription(oldTable.getRefreshHandlerDescription().orElse(null))
-                .serializedRefreshHandler(oldTable.getSerializedRefreshHandler())
-                .build();
-    }
-
-    private List<Column> validateAndExtractNewColumns(
-            ResolvedSchema oldSchema, ResolvedSchema newSchema) {
-        List<Column> newAddedColumns = new ArrayList<>();
-        int originalColumnSize = oldSchema.getColumns().size();
-        int newColumnSize = newSchema.getColumns().size();
-
-        if (originalColumnSize > newColumnSize) {
-            throw new ValidationException(
-                    String.format(
-                            "Failed to modify query because drop column is unsupported. "
-                                    + "When modifying a query, you can only append new columns at the end of original schema. "
-                                    + "The original schema has %d columns, but the newly derived schema from the query has %d columns.",
-                            originalColumnSize, newColumnSize));
-        }
-
-        for (int i = 0; i < oldSchema.getColumns().size(); i++) {
-            Column oldColumn = oldSchema.getColumns().get(i);
-            Column newColumn = newSchema.getColumns().get(i);
-            if (!oldColumn.equals(newColumn)) {
-                throw new ValidationException(
-                        String.format(
-                                "When modifying the query of a materialized table, "
-                                        + "currently only support appending columns at the end of original schema, dropping, renaming, and reordering columns are not supported.\n"
-                                        + "Column mismatch at position %d: Original column is [%s], but new column is [%s].",
-                                i, oldColumn, newColumn));
-            }
-        }
-
-        for (int i = oldSchema.getColumns().size(); i < newSchema.getColumns().size(); i++) {
-            Column newColumn = newSchema.getColumns().get(i);
-            newAddedColumns.add(newColumn.copy(newColumn.getDataType().nullable()));
-        }
-
-        return newAddedColumns;
+        return buildUpdatedMaterializedTable(
+                oldTable,
+                builder -> {
+                    builder.schema(newSchemaBuilder.build());
+                    builder.originalQuery(originalQuery).expandedQuery(expandedQuery);
+                });
     }
 }

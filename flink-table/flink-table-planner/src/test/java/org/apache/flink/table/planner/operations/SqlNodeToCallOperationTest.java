@@ -42,10 +42,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Test cases for the call statements for {@link SqlNodeToOperationConversion}. */
-public class SqlNodeToCallOperationTest extends SqlNodeToOperationConversionTestBase {
+class SqlNodeToCallOperationTest extends SqlNodeToOperationConversionTestBase {
 
     @BeforeEach
-    public void before() {
+    void before() {
         CatalogWithBuiltInProcedure procedureCatalog =
                 new CatalogWithBuiltInProcedure("procedure_catalog");
         catalogManager.registerCatalog("p1", procedureCatalog);
@@ -153,9 +153,14 @@ public class SqlNodeToCallOperationTest extends SqlNodeToOperationConversionTest
 
         // should throw exception when the expression argument can't be reduced
         // to literal
-        assertThatThrownBy(() -> parse("call `system`.row_result(cast((1.2 + 2.4) as decimal))"))
+        assertThatThrownBy(
+                        () ->
+                                parse(
+                                        "call `system`.row_result(cast((1.2 + nullif(3, 2.4)) as decimal))"))
                 .hasMessageContaining(
-                        "The argument at position 0 CAST(CAST(1.2 + 2.4 AS DECIMAL) AS DECIMAL(10, 2)) for calling procedure can't be converted to literal.");
+                        "The argument at position 0 "
+                                + "CAST(CAST(1.2 + CASE WHEN 3 = 2.4 THEN NULL ELSE 3 END AS DECIMAL) AS DECIMAL(10, 2)) "
+                                + "for calling procedure can't be converted to literal.");
     }
 
     private void verifyCallOperation(String sql, String expectSummary) {

@@ -18,7 +18,7 @@
 
 package org.apache.flink.table.planner.operations.converters;
 
-import org.apache.flink.sql.parser.ddl.SqlAlterMaterializedTableSuspend;
+import org.apache.flink.sql.parser.ddl.materializedtable.SqlAlterMaterializedTableSuspend;
 import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.UnresolvedIdentifier;
 import org.apache.flink.table.operations.Operation;
@@ -29,7 +29,7 @@ public class SqlAlterMaterializedTableSuspendConverter
         implements SqlNodeConverter<SqlAlterMaterializedTableSuspend> {
     @Override
     public Operation convertSqlNode(SqlAlterMaterializedTableSuspend node, ConvertContext context) {
-        UnresolvedIdentifier unresolvedIdentifier = UnresolvedIdentifier.of(node.fullTableName());
+        UnresolvedIdentifier unresolvedIdentifier = UnresolvedIdentifier.of(node.getFullName());
         ObjectIdentifier identifier =
                 context.getCatalogManager().qualifyIdentifier(unresolvedIdentifier);
         return new AlterMaterializedTableSuspendOperation(identifier);

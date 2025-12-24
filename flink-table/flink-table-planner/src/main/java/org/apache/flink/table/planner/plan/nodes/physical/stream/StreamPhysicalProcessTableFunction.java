@@ -103,6 +103,8 @@ public class StreamPhysicalProcessTableFunction extends AbstractRelNode
         this.inputs = inputs;
         this.rowType = rowType;
         this.scan = scan;
+        final RexCall call = (RexCall) scan.getCall();
+        validateAllowSystemArgs(call);
         this.uid = deriveUniqueIdentifier(scan);
         verifyInputSize(ShortcutUtils.unwrapTableConfig(cluster), inputs.size());
     }
@@ -218,7 +220,8 @@ public class StreamPhysicalProcessTableFunction extends AbstractRelNode
         final RexNode uidRexNode = operands.get(operands.size() - 1);
         if (uidRexNode.getKind() == SqlKind.DEFAULT) {
             // Optional for constant or row semantics functions
-            if (staticArgs.stream().noneMatch(arg -> arg.is(StaticArgumentTrait.TABLE_AS_SET))) {
+            if (staticArgs.stream()
+                    .noneMatch(arg -> arg.is(StaticArgumentTrait.SET_SEMANTIC_TABLE))) {
                 return null;
             }
             final String uid =
@@ -239,6 +242,19 @@ public class StreamPhysicalProcessTableFunction extends AbstractRelNode
         }
         // Otherwise UID should be correct as it has been checked by SystemTypeInference.
         return RexLiteral.stringValue(uidRexNode);
+    }
+
+    public static void validateAllowSystemArgs(RexCall rexCall) {
+        final BridgingSqlFunction.WithTableFunction function =
+                (BridgingSqlFunction.WithTableFunction) rexCall.getOperator();
+
+        if (function.getTypeInference().disableSystemArguments()) {
+            // Disabling uid and time attributes for process table functions with implementation
+            // is not supported for now. It can only be disabled for syntax purpose: for example
+            // it's disabled for ML_PREDICT which is not processed by this rule.
+            throw new ValidationException(
+                    "Disabling system arguments is not supported for user-defined PTF.");
+        }
     }
 
     private static void verifyTimeAttributes(

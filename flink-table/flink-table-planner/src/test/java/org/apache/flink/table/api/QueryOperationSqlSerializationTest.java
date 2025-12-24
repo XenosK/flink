@@ -68,9 +68,12 @@ public class QueryOperationSqlSerializationTest implements TableTestProgramRunne
                 QueryOperationTestPrograms.OVER_WINDOW_ROWS_UNBOUNDED_NO_PARTITION,
                 QueryOperationTestPrograms.OVER_WINDOW_LAG,
                 QueryOperationTestPrograms.ACCESSING_NESTED_COLUMN,
-                QueryOperationTestPrograms.TABLE_AS_ROW_PTF,
-                QueryOperationTestPrograms.TABLE_AS_SET_PTF,
-                QueryOperationTestPrograms.INLINE_FUNCTION_SERIALIZATION);
+                QueryOperationTestPrograms.ROW_SEMANTIC_TABLE_PTF,
+                QueryOperationTestPrograms.SET_SEMANTIC_TABLE_PTF,
+                QueryOperationTestPrograms.INLINE_FUNCTION_SERIALIZATION,
+                QueryOperationTestPrograms.ML_PREDICT_MODEL_API,
+                QueryOperationTestPrograms.ASYNC_ML_PREDICT_MODEL_API,
+                QueryOperationTestPrograms.ASYNC_ML_PREDICT_TABLE_API_MAP_EXPRESSION_CONFIG);
     }
 
     @ParameterizedTest
@@ -139,6 +142,7 @@ public class QueryOperationSqlSerializationTest implements TableTestProgramRunne
         final Map<String, String> connectorOptions = new HashMap<>();
         connectorOptions.put("connector", "values");
         program.getSetupSourceTestSteps().forEach(s -> s.apply(env, connectorOptions));
+        program.getSetupModelTestSteps().forEach(s -> s.apply(env, Map.of("provider", "values")));
         program.getSetupSinkTestSteps().forEach(s -> s.apply(env, connectorOptions));
         program.getSetupFunctionTestSteps().forEach(f -> f.apply(env));
         program.getSetupSqlTestSteps().forEach(s -> s.apply(env));
@@ -148,6 +152,8 @@ public class QueryOperationSqlSerializationTest implements TableTestProgramRunne
     @Override
     public EnumSet<TestKind> supportedSetupSteps() {
         return EnumSet.of(
+                TestKind.CONFIG,
+                TestKind.MODEL,
                 TestKind.SQL,
                 TestKind.FUNCTION,
                 TestKind.SOURCE_WITH_DATA,

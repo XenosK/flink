@@ -18,11 +18,16 @@
 
 package org.apache.flink.table.planner.functions.utils;
 
+import org.apache.flink.table.api.ValidationException;
+import org.apache.flink.types.Either;
+
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.calcite.rel.type.RelDataTypeFieldImpl;
 import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlCallBinding;
+import org.apache.calcite.sql.SqlCharStringLiteral;
+import org.apache.calcite.sql.SqlDataTypeSpec;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlNode;
@@ -34,6 +39,7 @@ import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.sql.type.SqlTypeUtil;
 import org.apache.calcite.sql.validate.SqlNameMatcher;
 import org.apache.calcite.sql.validate.SqlValidator;
+import org.apache.calcite.util.NlsString;
 import org.apache.calcite.util.Pair;
 
 import java.util.ArrayList;
@@ -43,6 +49,8 @@ import java.util.Optional;
 import java.util.Set;
 
 import static org.apache.calcite.util.Static.RESOURCE;
+import static org.apache.flink.table.planner.calcite.FlinkTypeFactory.toLogicalType;
+import static org.apache.flink.table.types.logical.LogicalTypeFamily.CHARACTER_STRING;
 
 /** Utility methods related to SQL validation. */
 public class SqlValidatorUtils {
@@ -160,29 +168,70 @@ public class SqlValidatorUtils {
     /**
      * Make output field names unique from input field names by appending index. For example, Input
      * has field names {@code a, b, c} and output has field names {@code b, c, d}. After calling
-     * this function, new output field names will be {@code b0, c0, d}. Duplicate names are not
-     * checked inside input and output itself.
+     * this function, new output field names will be {@code b0, c0, d}.
+     *
+     * <p>We assume that input fields in the input parameter are uniquely named, just as the output
+     * fields in the output parameter are.
      *
      * @param input Input fields
      * @param output Output fields
-     * @return
+     * @return output fields with unique names.
      */
     public static List<RelDataTypeField> makeOutputUnique(
             List<RelDataTypeField> input, List<RelDataTypeField> output) {
-        final Set<String> inputFieldNames = new HashSet<>();
+        final Set<String> uniqueNames = new HashSet<>();
         for (RelDataTypeField field : input) {
-            inputFieldNames.add(field.getName());
+            uniqueNames.add(field.getName());
         }
 
         List<RelDataTypeField> result = new ArrayList<>();
         for (RelDataTypeField field : output) {
             String fieldName = field.getName();
-            if (inputFieldNames.contains(fieldName)) {
-                fieldName += "0"; // Append index to make it unique
+            int count = 0;
+            String candidate = fieldName;
+            while (uniqueNames.contains(candidate)) {
+                candidate = fieldName + count;
+                count++;
             }
-            result.add(new RelDataTypeFieldImpl(fieldName, field.getIndex(), field.getType()));
+            uniqueNames.add(candidate);
+            result.add(new RelDataTypeFieldImpl(candidate, field.getIndex(), field.getType()));
         }
         return result;
+    }
+
+    public static Either<String, RuntimeException> reduceLiteralToString(
+            SqlNode operand, SqlValidator validator) {
+        if (operand instanceof SqlCharStringLiteral) {
+            return Either.Left(
+                    ((SqlCharStringLiteral) operand).getValueAs(NlsString.class).getValue());
+        } else if (operand.getKind() == SqlKind.CAST) {
+            // CAST(CAST('v' AS STRING) AS STRING)
+            SqlCall call = (SqlCall) operand;
+            SqlDataTypeSpec dataType = call.operand(1);
+            if (!toLogicalType(dataType.deriveType(validator)).is(CHARACTER_STRING)) {
+                return Either.Right(
+                        new ValidationException("Don't support to cast value to non-string type."));
+            }
+            SqlNode operand0 = call.operand(0);
+            if (operand0 instanceof SqlCharStringLiteral) {
+                return Either.Left(
+                        ((SqlCharStringLiteral) operand0).getValueAs(NlsString.class).getValue());
+            } else {
+                return Either.Right(
+                        new ValidationException(
+                                String.format(
+                                        "Unsupported expression %s is in runtime config at position %s. Currently, "
+                                                + "runtime config should be be a MAP of string literals.",
+                                        operand, operand.getParserPosition())));
+            }
+        } else {
+            return Either.Right(
+                    new ValidationException(
+                            String.format(
+                                    "Unsupported expression %s is in runtime config at position %s. Currently, "
+                                            + "runtime config should be be a MAP of string literals.",
+                                    operand, operand.getParserPosition())));
+        }
     }
 
     private static SqlNode castTo(SqlNode node, RelDataType type) {
